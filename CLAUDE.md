@@ -62,3 +62,7 @@ Permanent: superpowers, episodic-memory, frontend-design, firecrawl,
 On-demand: Tier 3 auto-install via PROJECT.md "Plugins:" field
   Available: playwright, greptile, pyright-lsp, superpowers-lab
 Config: config/claude_settings_template.json, bin/plugin_manager.py
+## Workspace
+Yazi file browser: `yazi /root/dqiii8` (config: ~/.config/yazi/yazi.toml)
+tmux layouts in bin/workspace/ — aliases: workspace, beeswarm, monitor
+See .claude/rules/workspace.md for when to suggest each layout.
