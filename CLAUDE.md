@@ -66,3 +66,8 @@ Config: config/claude_settings_template.json, bin/plugin_manager.py
 Yazi file browser: `yazi /root/dqiii8` (config: ~/.config/yazi/yazi.toml)
 tmux layouts in bin/workspace/ — aliases: workspace, beeswarm, monitor
 See .claude/rules/workspace.md for when to suggest each layout.
+
+## PROTOCOLO CERO COMPLACENCIA (Global)
+- **Cero falso éxito:** Valida siempre el artefacto final real (DOCX/API/etc), no solo los tests automáticos. Cero dopamina rápida.
+- **Rigor y Raíz:** Resuelve ambigüedades con la opción más robusta. Ataca la raíz del fallo.
+- **Gatekeeper:** Si un error se repite, instrumenta un QA estructural sobre el archivo final que bloquee obligatoriamente su entrega (send/deploy).
