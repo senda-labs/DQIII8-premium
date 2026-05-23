@@ -9,9 +9,10 @@ Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 
 ## System Map
 - DQ Pipeline (8 steps): Domain → Subdomain → Router → Agent → Knowledge → Gate → Intent → Stream
-- DB: `database/dqiii8.db` (79 tables) + `dqiii8_metrics.db` | Schema: `database/schema_v2.sql`
-- Hooks (12): `.claude/hooks/` | Skills (17): `.claude/skills/` | Agents (9): `.claude/agents/`
+- DB: `database/dqiii8.db` (65 tables live; schema_v2.sql defines 43 — drift pending reconciliation) + `dqiii8_metrics.db` | Schema: `database/schema_v2.sql`
+- Hooks (14): `.claude/hooks/` | Skills (18): `.claude/skills/` | Agents (11): `.claude/agents/`
 - Entry: `bin/core/openrouter_wrapper.py` | Director: `bin/director.py` | Bot: `bin/ui/dqiii8_bot.py`
+- → Mapa completo y anotado: [[tasks/FULL_SYSTEM_MAP|Full System Map]] · Decisión arquitectónica: [[docs/architecture_decision_context_efficiency|ADR-001]]
 
 ## Rule Engine — Read Before Acting
 
@@ -35,3 +36,9 @@ Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 ## Projects
 Each lives in `my-projects/{name}/` with its own `PROJECT.md`. Scan before working:
 `ls my-projects/*/PROJECT.md` → read `PROJECT.md` → read `RULE`.
+Active projects: [[my-projects/PROJECT|Plan Maestro]] · [[my-projects/intl-reports/PROJECT|intl-reports]] · [[my-projects/content-automation/PROJECT|content-automation]]
+
+## New Project / Feature Creation
+Use Spec-Driven Development (SDD) via spec-kit for any feature touching ≥3 modules or new architecture.
+Skill: `/speckit` — covers installation, full cycle, and dqiii8 constraints (no git extension, no auto-push).
+Reference implementation: `my-projects/pokemon-genesis-chaos/specs/001-tileforge-saas/`
