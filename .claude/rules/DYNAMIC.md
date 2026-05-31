@@ -21,6 +21,12 @@ CRÍTICO post-init: borrar `.specify/extensions/git/` + skills `speckit-git-*` +
 Ciclo: `/speckit-constitution` → `/speckit-specify` → `/speckit-plan` → `/speckit-tasks` → implementar manualmente
 Referencia: `my-projects/pokemon-genesis-chaos/specs/001-tileforge-saas/`
 
+## INTL-REPORTS — Scripts batch (INVARIANTE)
+
+PROHIBIDO usar `set -e`, `set -euo pipefail` en scripts que iteran sobre múltiples empresas.
+El fallo de una sección es local a esa empresa — no debe abortar empresas independientes.
+El orchestrator gestiona sus fallos internamente por empresa. El bucle `for slug` siempre continúa.
+
 ## INTL-REPORTS (resumen ejecutivo)
 
 Entry point: python3 -m core.cli run --slug {SLUG}   ← SOLO desde tmux externo
