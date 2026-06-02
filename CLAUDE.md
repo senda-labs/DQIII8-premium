@@ -8,7 +8,7 @@ Start cheap. Escalate only on explicit task-type match or tier failure.
 Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 
 ## System Map
-- DQ Pipeline (8 steps): Domain → Subdomain → Router → Agent → Knowledge → Gate → Intent → Stream
+- DQ Pipeline (7 steps): Classify → Retrieve → Gate → Amplify → Route → Execute → Memory
 - DB: `database/dqiii8.db` (46 tables + 20 views live; schema_v2.sql defines 65) + `dqiii8_metrics.db` | Schema: `database/schema_v2.sql`
 - Hooks (14): `.claude/hooks/` | Skills (19): `.claude/skills/` | Agents (17): `.claude/agents/`
 - Entry: `bin/core/openrouter_wrapper.py` | Director: `bin/director.py` | Bot: `bin/ui/dqiii8_bot.py`
@@ -34,6 +34,9 @@ Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 - NEVER commit `*.db` files — they are gitignored. Use `database/schema_v2.sql` for fresh installs.
 - DENY from PermissionAnalyzer is final — do not retry or bypass.
 - `ANTHROPIC_API_KEY` must be `""` in subprocess env when using Claude Code OAuth.
+- Plans touching ≥3 modules OR with ambiguous scope → enter plan mode first, wait for confirmation.
+- Destructive / irreversible actions (rm -rf, DROP, force-push, schema change) → STOP, notify user, wait.
+- `tasks/audit/` path is hardcoded in red-team, blue-team, security-cycle skills — never rename it.
 
 ## Projects
 Each lives in `my-projects/{name}/` with its own `PROJECT.md`. Scan before working:

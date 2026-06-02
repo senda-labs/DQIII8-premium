@@ -21,7 +21,6 @@ All active projects under `my-projects/` and their entry points.
 | mejorapoker-src | `my-projects/mejorapoker-src/` | ACTIVE | — |
 | ouroboros-q-eml | `my-projects/ouroboros-q-eml/` | ACTIVE | — |
 | global-media-org | `my-projects/global-media-org/` | ACTIVE | — |
-| auto-report | `my-projects/auto-report/` | ACTIVE | — |
 
 ## Archived Projects
 `my-projects/archived-projects/` — hult-finance, math-image-generator, sentiment-jobsearch, auto-report.tar.gz, python-for-analyst

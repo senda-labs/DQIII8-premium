@@ -54,7 +54,8 @@ python -m pytest tests/      # run test suite
 
 ## Gitignore Note
 
-`sessions/`, `uploads/`, and `tasks/` are gitignored — none of this ops content is tracked in git.
+`sessions/` and `uploads/` are gitignored. Within `tasks/`, only specific subpaths are ignored (e.g. `tasks/results/`, `tasks/nightly-report.md`, `tasks/status.md`, `tasks/audit_pending.flag`) — `tasks/audit/` and others stay tracked.
+Canonical ignore rules live in the repo-root `.gitignore` (also covers `*.db`, `.env`, `__pycache__/`, `.venv/`).
 
 ---
 
