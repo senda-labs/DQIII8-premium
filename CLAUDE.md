@@ -1,5 +1,5 @@
 # DQIII8 — Index Kernel
-Autonomous AI orchestration (Ubuntu VPS, SSH-only).
+Autonomous AI orchestration (VPS, SSH-only). Servidor activo: → `infrastructure/ACTIVE.md`
 UI: Telegram @JARVISCONTROL3BOT | CLI: `j cc` / `j loop` / `j status`
 
 ## Routing Tiers (Cost-First — STRICT)
@@ -12,7 +12,9 @@ Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 - DB: `database/dqiii8.db` (46 tables + 20 views live; schema_v2.sql defines 65) + `dqiii8_metrics.db` | Schema: `database/schema_v2.sql`
 - Hooks (14): `.claude/hooks/` | Skills (19): `.claude/skills/` | Agents (17): `.claude/agents/`
 - Entry: `bin/core/openrouter_wrapper.py` | Director: `bin/director.py` | Bot: `bin/ui/dqiii8_bot.py`
+- Infraestructura: `infrastructure/ACTIVE.md` (servidor activo) · `infrastructure/servers/` (historial)
 - → Mapa completo y anotado: [[tasks/FULL_SYSTEM_MAP|Full System Map]] · Decisión arquitectónica: [[docs/architecture_decision_context_efficiency|ADR-001]]
+- → Vault navigation: `zones/000_INDEX.md` (routing · zone map · decision tree) · `zones/SESSION.md` (handover state)
 
 ## Rule Engine — Read Before Acting
 
@@ -36,7 +38,7 @@ Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 ## Projects
 Each lives in `my-projects/{name}/` with its own `PROJECT.md`. Scan before working:
 `ls my-projects/*/PROJECT.md` → read `PROJECT.md` → read `RULE`.
-Active projects: [[my-projects/ANOVA-PLAN-v2|Plan Maestro]] · [[my-projects/intl-reports/PROJECT|intl-reports]] · [[my-projects/content-automation/PROJECT|content-automation]]
+Índice completo: [[my-projects/PROJECT|my-projects/PROJECT.md]] · Activos destacados: [[my-projects/intl-reports/PROJECT|intl-reports]] · [[my-projects/content-automation/PROJECT|content-automation]]
 
 ## New Project / Feature Creation
 Use Spec-Driven Development (SDD) via spec-kit for any feature touching ≥3 modules or new architecture.
