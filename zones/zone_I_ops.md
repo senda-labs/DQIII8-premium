@@ -1,5 +1,5 @@
 # Zone I — Ops
-> Updated: 2026-06-02
+> Updated: 2026-06-16
 
 ---
 
@@ -18,10 +18,11 @@ cat sessions/SESSION-{date}.md
 ```
 
 Recent:
-- `2026-06-02_session_3.md` — vault reorganization
-- `2026-06-02_session_2.md`
-- `2026-06-02_session_1.md`
-- `SESSION-20260529-netcup.md` — Netcup migration session
+- `2026-06-16_session_1.md` — untracked commits, health timer, vault update
+- `2026-06-12_session_1.md` — plan_compiler + tests + security fixes
+- `2026-06-11_session_2.md`
+- `2026-06-11_session_1.md`
+- `2026-06-09_session_4.md`
 
 ---
 

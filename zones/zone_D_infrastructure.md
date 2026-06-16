@@ -1,5 +1,5 @@
 # Zone D — Infrastructure
-> Updated: 2026-06-02
+> Updated: 2026-06-16
 
 ---
 
@@ -43,9 +43,27 @@ Server history → `infrastructure/servers/`
 |---|---|
 | `infrastructure/ACTIVE.md` | Current server — always read first for server state |
 | `infrastructure/servers/` | Historical server configs |
+| `infrastructure/systemd/` | Systemd unit files (dqiii8-health.service + .timer) |
 | `bin/ui/dqiii8_bot.py` | Telegram bot |
 | `bin/core/auth_watchdog.py` | OAuth / API key watchdog |
 | `bin/core/notify.py` | Notification system |
+| `bin/tools/health_check.py` | Daily health probe (runs via dqiii8-health.timer @ 07:30) |
+
+---
+
+## Active Services
+
+| Service | Status | Role |
+|---|---|---|
+| `dq-dashboard.service` | active | DQIII8 Dashboard |
+| `dqiii8-bot.service` | active | Telegram Bot |
+| `jarvis-monitor.service` | active | System Monitor |
+| `dqiii8-health.timer` | active | Daily health check @ 07:30 |
+
+```bash
+systemctl status dqiii8-bot    # check bot
+systemctl status dqiii8-health.timer
+```
 
 ---
 
