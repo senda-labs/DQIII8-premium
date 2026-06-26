@@ -3,7 +3,7 @@ Autonomous AI orchestration (VPS, SSH-only). Servidor activo: → `infrastructur
 UI: Telegram @JARVISCONTROL3BOT | CLI: `j cc` / `j loop` / `j status`
 
 ## Routing Tiers (Cost-First — STRICT)
-C (Ollama/local $0) → B (Groq $0) → B+ (GitHub $0) → A (Sonnet ~$0.03) → S (Opus ~$0.20)
+C (Ollama/local $0) → B (Groq $0) → B+ (NIM $0, 40RPM, 1M ctx) → B++ (GitHub $0) → A (Sonnet ~$0.03) → S (Opus ~$0.20)
 Start cheap. Escalate only on explicit task-type match or tier failure.
 Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 
