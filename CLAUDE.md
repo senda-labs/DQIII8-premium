@@ -10,8 +10,9 @@ Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 ## System Map
 - DQ Pipeline (7 steps): Classify → Retrieve → Gate → Amplify → Route → Execute → Memory
 - DB: `database/dqiii8.db` (46 tables + 20 views live; schema_v2.sql defines 65) + `dqiii8_metrics.db` | Schema: `database/schema_v2.sql`
-- Hooks (14): `.claude/hooks/` | Skills (19): `.claude/skills/` | Agents (17): `.claude/agents/`
+- Hooks (14): `.claude/hooks/` | Skills (21): `.claude/skills/` | Agents (17): `.claude/agents/`
 - Entry: `bin/core/openrouter_wrapper.py` | Director: `bin/director.py` | Bot: `bin/ui/dqiii8_bot.py`
+- Dispatch (CC↔dqiii8): `bin/core/dispatch.py` | Skill: `/dispatch-agent` | Results: `tasks/results/`
 - Infraestructura: `infrastructure/ACTIVE.md` (servidor activo) · `infrastructure/servers/` (historial)
 - → Mapa completo y anotado: [[tasks/FULL_SYSTEM_MAP|Full System Map]] · Decisión arquitectónica: [[docs/architecture_decision_context_efficiency|ADR-001]]
 - → Vault navigation: `zones/000_INDEX.md` (routing · zone map · decision tree) · `zones/SESSION.md` (handover state)
