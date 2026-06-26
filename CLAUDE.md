@@ -27,7 +27,7 @@ Full table + decision algorithm → `.claude/rules/03_tiering_and_routing.md`
 | Tiering / routing / agent changes | `.claude/rules/03_tiering_and_routing.md` |
 | Git / Bash safety | `.claude/rules_db/git-safety.md` |
 | Error prevention (recurring) | `.claude/rules_db/dqiii8-error-prevention.md` |
-| intl-reports pipeline | `.claude/rules/DYNAMIC.md` (injected by dispatcher) |
+| intl-reports pipeline | `my-projects/intl-reports/RULE` (reglas absolutas + pipeline) |
 
 ## Inviolable Rules
 - NEVER write to `.env`, `CLAUDE.md`, `.credentials.json`, `database/schema.sql` from generated code.
