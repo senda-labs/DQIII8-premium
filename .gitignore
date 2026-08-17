@@ -167,6 +167,17 @@ decisions/
 database/audit_reports/
 database/qdrant/
 
+# Red-team / Opus adversarial review reports, panel reviews, disaster-test
+# reports — private, may reference real infra/credentials/findings.
+docs/audits/
+
+# Internal implementation plans (private roadmaps/scope, may reference
+# real infra or findings not meant for the public repo)
+.claude/plans/
+
+# spec-kit specs (internal feature specs — same rationale as plans/)
+specs/
+
 # User projects — track placeholder only, never project contents
 my-projects/*/
 
