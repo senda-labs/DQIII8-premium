@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import struct
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -484,7 +485,12 @@ def make_zip_with_duplicate_entry_names(path: Path) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("[Content_Types].xml", _DOCX_CONTENT_TYPES)
         zf.writestr("word/document.xml", b"<first/>")
-        zf.writestr("word/document.xml", b"<second/>")
+        # zipfile itself warns on the duplicate name — that's the exact
+        # condition this fixture exists to construct, so suppress it here
+        # rather than let it leak into every test run's warnings summary.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            zf.writestr("word/document.xml", b"<second/>")
     raw = buf.getvalue()
     path.write_bytes(raw)
     return raw

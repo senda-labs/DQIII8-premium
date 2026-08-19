@@ -141,11 +141,11 @@ class TestReduce:
     def test_reduce_single_subtask(self, swarm):
         """Single subtask → result returned directly without LLM call."""
         st = _fake_subtask(0, result="found bug at line 42")
-        reduced = asyncio.get_event_loop().run_until_complete(swarm._reduce([st]))
+        reduced = asyncio.run(swarm._reduce([st]))
         assert reduced == "found bug at line 42"
 
     def test_reduce_empty(self, swarm):
-        reduced = asyncio.get_event_loop().run_until_complete(swarm._reduce([]))
+        reduced = asyncio.run(swarm._reduce([]))
         assert reduced == ""
 
 
