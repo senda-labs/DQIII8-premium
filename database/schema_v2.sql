@@ -707,16 +707,6 @@ CREATE TABLE IF NOT EXISTS vault_memory (
 );
 CREATE INDEX IF NOT EXISTS idx_vault_memory_project
     ON vault_memory(project, last_seen);
-CREATE TABLE IF NOT EXISTS resource_claims (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    resource    TEXT NOT NULL UNIQUE,      -- file path or logical resource name
-    agent       TEXT NOT NULL,             -- agent_name that holds the claim
-    session_id  TEXT NOT NULL,
-    claimed_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at  TEXT NOT NULL              -- datetime('now', '+30 minutes') on insert
-);
-CREATE INDEX IF NOT EXISTS idx_resource_claims_expires
-    ON resource_claims(expires_at);
 CREATE TABLE IF NOT EXISTS model_satisfaction (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp           TEXT    NOT NULL DEFAULT (datetime('now')),

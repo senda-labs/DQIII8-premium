@@ -2571,11 +2571,13 @@ def test_r6_force_push_regex_no_false_positives(cmd):
 
 # ── 2026-08-18 — the stateful / DB-backed layer (panel-6 v4 findings F1-F3) ──
 # Until this block the ~250 lines behind _check_budget, _check_repeat_rejections,
-# _check_resource_claim, _is_learned_safe, record_decision and record_rejection
-# had zero tests: two of the three rows in 02_hooks_and_permissions.md's own
-# decision table (budget DENY, repeat-rejection ESCALATE) were never produced by
-# any test, and two `except` handlers fell through to None (fail-open) with
-# nothing pinning the direction.
+# _is_learned_safe, record_decision and record_rejection had zero tests: two of
+# the three rows in 02_hooks_and_permissions.md's own decision table (budget
+# DENY, repeat-rejection ESCALATE) were never produced by any test, and two
+# `except` handlers fell through to None (fail-open) with nothing pinning the
+# direction. (_check_resource_claim itself, and its tests, were removed
+# 2026-08-19 — resource_claims never had a production writer; see
+# database/migrations/2026-08-19_drop_resource_claims.up.sql.)
 
 import sqlite3 as _sqlite3  # noqa: E402
 
@@ -2651,30 +2653,6 @@ def test_budget_db_error_denies_through_evaluate(unopenable_db, monkeypatch):
     r = analyzer.evaluate("Bash", {"command": "ls -la"}, session_id="pytest-budget")
     assert r["decision"] == "DENY", r
     assert r["rule_triggered"] == "analyzer_internal_error", r
-
-
-def test_check_resource_claim_fails_closed_on_db_error(unopenable_db):
-    """The multi-agent write lock must not disappear on a DB error."""
-    r = analyzer._check_resource_claim("Write", "/tmp/x/file.txt", "sess-a")
-    assert r is not None, "resource-claim check returned None on DB error — fail-open"
-    assert r["decision"] == "DENY", r
-    assert r["rule_triggered"] == "analyzer_internal_error", r
-
-
-def test_check_resource_claim_fails_closed_on_internal_exception(monkeypatch):
-    def _boom(*a, **kw):
-        raise RuntimeError("simulated sqlite failure inside _check_resource_claim")
-
-    monkeypatch.setattr(_pa.sqlite3, "connect", _boom)
-    r = analyzer._check_resource_claim("Write", "/tmp/x/file.txt", "sess-a")
-    assert r is not None and r["decision"] == "DENY", r
-    assert r["rule_triggered"] == "analyzer_internal_error", r
-
-
-def test_check_resource_claim_empty_path_is_not_an_error(unopenable_db):
-    """The no-path early return predates the DB access and must stay a
-    pass-through — fail-closed applies to checks that ran and errored."""
-    assert analyzer._check_resource_claim("Write", "", "sess-a") is None
 
 
 def test_is_learned_safe_fails_closed_on_db_error(unopenable_db):
@@ -2829,43 +2807,6 @@ def test_repeat_rejections_inproc_counter_resets_when_db_healthy(
 
 
 # ── F3 — resource claims, learned approvals, record_* ───────────────────────
-
-
-def test_check_resource_claim_denies_when_another_session_holds_it(perm_db):
-    conn = _sqlite3.connect(str(perm_db))
-    conn.execute(
-        "INSERT INTO resource_claims (resource, agent, session_id, expires_at) "
-        "VALUES ('/srv/shared/x.py', 'other-agent', 'sess-other', "
-        "datetime('now','+30 minutes'))"
-    )
-    conn.commit()
-    conn.close()
-    r = analyzer._check_resource_claim("Write", "/srv/shared/x.py", "sess-mine")
-    assert r is not None and r["decision"] == "DENY", r
-    assert r["rule_triggered"] == "resource_claim", r
-    assert "other-agent" in r["reason"], r["reason"]
-
-
-def test_check_resource_claim_ignores_expired_and_own_claims(perm_db):
-    conn = _sqlite3.connect(str(perm_db))
-    conn.execute(
-        "INSERT INTO resource_claims (resource, agent, session_id, expires_at) "
-        "VALUES ('/srv/shared/expired.py', 'other-agent', 'sess-other', "
-        "datetime('now','-1 minute'))"
-    )
-    conn.execute(
-        "INSERT INTO resource_claims (resource, agent, session_id, expires_at) "
-        "VALUES ('/srv/shared/mine.py', 'me', 'sess-mine', "
-        "datetime('now','+30 minutes'))"
-    )
-    conn.commit()
-    conn.close()
-    assert analyzer._check_resource_claim(
-        "Write", "/srv/shared/expired.py", "sess-mine"
-    ) is None
-    assert analyzer._check_resource_claim(
-        "Write", "/srv/shared/mine.py", "sess-mine"
-    ) is None
 
 
 def test_is_learned_safe_matches_only_active_rows(perm_db):

@@ -164,35 +164,6 @@ def test_implicit_correction_captured_in_vault():
         assert src == "post_tool_use"
 
 
-def test_claims_conflict_detected():
-    """Two concurrent session claims on the same resource produce a detectable conflict."""
-    db = sqlite3.connect(":memory:")
-    db.execute("""
-        CREATE TABLE resource_claims (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            resource TEXT NOT NULL,
-            claimed_at TEXT DEFAULT (datetime('now'))
-        )
-        """)
-    db.execute(
-        "INSERT INTO resource_claims (session_id, resource) VALUES ('session-A', 'scene_director.py')"
-    )
-    db.execute(
-        "INSERT INTO resource_claims (session_id, resource) VALUES ('session-B', 'scene_director.py')"
-    )
-    db.commit()
-
-    conflicts = db.execute(
-        "SELECT resource, COUNT(*) AS n FROM resource_claims GROUP BY resource HAVING n > 1"
-    ).fetchall()
-    db.close()
-
-    assert len(conflicts) == 1, f"Expected 1 conflicted resource, got {len(conflicts)}"
-    assert conflicts[0][0] == "scene_director.py"
-    assert conflicts[0][1] == 2
-
-
 def test_pre_tool_use_resolves_project_from_cwd(tmp_path):
     """When stdin cwd is under my-projects/<name>/, agent_actions.project is set.
 
