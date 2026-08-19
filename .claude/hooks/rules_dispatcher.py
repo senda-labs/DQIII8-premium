@@ -3,15 +3,15 @@ DQIII8 — Rules Dispatcher (RAG de Reglas Dinámico)
 Inyecta SÓLO las reglas relevantes al contexto del tool en curso.
 
 En lugar de cargar el corpus de reglas entero en cada turno, este módulo mapea
-tool + input → subconjunto mínimo de reglas (~1060–8277 tokens, cl100k_base real).
+tool + input → subconjunto mínimo de reglas (~1211–8614 tokens, cl100k_base real).
 El número de archivos del registro no se cita aquí: el recuento vivo es
 `len(_REGISTRY)` y su parte de rules_db/ está fijada en CLAUDE.md
 ("Contextual rules (N)"), validada por check_claude_md_counts().
 
 RANGO CANÓNICO (medido con token_estimate(), cl100k_base real vía tiktoken):
-**suelo 1060** (solo _ALWAYS = ops + core-behavior), **techo 8277**.
-**suelo de sesión 2840** = ese suelo + CLAUDE.md + DYNAMIC.md, los dos ficheros que
-Claude Code auto-inyecta en toda sesión; es el impuesto de contexto real por sesión.
+**suelo 1211** (solo _ALWAYS = ops + core-behavior), **techo 8614**. Suelo de
+sesión 2599 (suelo + CLAUDE.md, el único fichero que Claude Code auto-inyecta en
+toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md.
 
 El techo es el MÁXIMO REALMENTE ALCANZABLE, no el peor caso de la matriz
 representativa: un Bash que combina todas las keywords de _BASH_KEYWORD_RULES
@@ -20,27 +20,33 @@ debajo de ese techo. Publicar el peor caso de la matriz deja fuera ambas.
 
 RE-MEDIR OBLIGATORIAMENTE siempre que cambie de tamaño 00_core_behavior.md,
 dqiii8-ops.md, o cualquier fichero de rules_db/ o rules/ que esté en _ALWAYS o
-en un trigger, y siempre que se añada/quite un trigger. Solo 2 sitios citan el
-rango y deben actualizarse juntos: este docstring y .claude/rules/DYNAMIC.md.
+en un trigger, y siempre que se añada/quite un trigger. Un solo sitio cita el
+rango: este docstring (CLAUDE.md solo referencia el mecanismo, no los números).
 02_hooks_and_permissions.md NO debe citar los números — apunta aquí
 (invariante verificada por bin/tools/validate_rules_registry.py, que además
 mide el suelo y los techos reales en cada commit).
 
-Las reglas contextuales residen en .claude/rules_db/, fuera del auto-inject de
-Claude Code: este dispatcher las carga bajo demanda. El único fichero de reglas
-que Claude Code auto-inyecta en el contexto de sesión es .claude/rules/DYNAMIC.md;
-el resto de .claude/rules/*.md se inyecta también bajo demanda por este dispatcher.
+Las reglas contextuales residen en .claude/rules_db/ y en .claude/rules/*.md
+(salvo 00_core_behavior.md, en _ALWAYS), fuera del auto-inject de Claude Code:
+este dispatcher las carga bajo demanda, una por alias, disparada por tool/
+comando/extensión — nunca el fichero de reglas entero de una tacada. Ningún
+fichero de rules/ ni rules_db/ se auto-inyecta por sí mismo; CLAUDE.md es el
+único auto-inyectado por Claude Code, y es deliberadamente distinto (metodología
+estática, no reglas dinámicas).
 """
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from pathlib import Path
 from typing import Sequence
 
-RULES_DB = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8")) / ".claude" / "rules_db"
+# Resolved from this file's own location, not DQIII8_ROOT: a worktree-isolated
+# subagent never gets DQIII8_ROOT exported into its env (subagent_start.py
+# creates the worktree but doesn't set it), so an env-var-based path silently
+# pointed every worktree agent's rules lookup back at the main tree's rules_db.
+RULES_DB = Path(__file__).resolve().parent.parent / "rules_db"
 
 # ── Rule file registry ────────────────────────────────────────────────────────
 # Paths are relative to RULES_DB; "../rules/" reaches the deterministic modules.
@@ -59,6 +65,7 @@ _REGISTRY: dict[str, str] = {
     "plan-gate":      "dqiii8-plan-gate.md",
     "workspace":      "workspace.md",
     "intl-reports":   "intl-reports-ops.md",
+    "speckit":        "dqiii8-speckit.md",
     "web-tools":      "web-research-tools.md",
     "agents":         "common/agents.md",
     "quality":        "common/quality.md",
@@ -100,6 +107,7 @@ _BASH_KEYWORD_RULES: list[tuple[re.Pattern, list[str]]] = [
     (re.compile(r"\btmux\b|\byazi\b|bin/workspace|launch_(swarm|beeswarm|monitor)"), ["workspace"]),
     (re.compile(r"generate_company|save_response|intl.writer|intl.reports"), ["intl-reports"]),
     (re.compile(r"\bfirecrawl\b"),                   ["web-tools"]),
+    (re.compile(r"speckit|spec-kit|specify\b"),      ["speckit"]),
 ]
 
 # ── File extension → rules ───────────────────────────────────────────────────
@@ -173,6 +181,10 @@ def get_rules(tool: str, tool_input: dict) -> str:
             aliases.extend(["tiering"])
         if "database/" in path or path.endswith(".sql"):
             aliases.extend(["db-mutations"])
+
+    # ── MCP dqiii8-db: same production-DB write surface as raw sqlite3 ───────
+    elif tool.startswith("mcp__dqiii8-db"):
+        aliases.extend(["db-mutations", "prevention"])
 
     # ── Deduplicate preserving order ─────────────────────────────────────────
     seen: set[str] = set()

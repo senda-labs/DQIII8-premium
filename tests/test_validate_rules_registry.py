@@ -143,12 +143,6 @@ def test_registered_alias_with_missing_file_is_a_problem(repo: Path):
 # ── check 2: token budget ───────────────────────────────────────────────────
 
 
-def test_token_range_mismatch_in_dynamic_md_is_a_problem(repo: Path):
-    edit(repo, ".claude/rules/DYNAMIC.md", f"{_FLOOR}–{_CEIL}", f"1999–{_CEIL}")
-    problems, _ = vrr.check_token_budget(src(repo))
-    assert any("DYNAMIC.md" in p and "disagrees" in p for p in problems), problems
-
-
 def test_restating_the_range_in_hooks_perms_is_a_problem(repo: Path):
     """02_hooks_and_permissions.md is itself injected — it must point at the
     docstring, never restate the numbers. It did, and drifted (2026-08-18)."""
@@ -164,13 +158,6 @@ def test_prose_bound_restatement_in_hooks_perms_is_a_problem(repo: Path):
     path.write_text(path.read_text() + f"\nel suelo de {_FLOOR} es ops + core-behavior\n", encoding="utf-8")
     problems, _ = vrr.check_token_budget(src(repo))
     assert any("must NOT restate the token range" in p for p in problems), problems
-
-
-def test_canonical_range_change_alone_breaks_the_docs(repo: Path):
-    """Re-measuring the dispatcher without updating DYNAMIC.md fails."""
-    edit(repo, ".claude/hooks/rules_dispatcher.py", f"**suelo {_FLOOR}**", "**suelo 2000**")
-    problems, _ = vrr.check_token_budget(src(repo))
-    assert any("disagrees" in p for p in problems), problems
 
 
 def test_missing_canonical_markers_is_a_problem(repo: Path):
@@ -380,7 +367,7 @@ def test_skills_count_drift_is_detected_when_the_directory_is_present(repo: Path
 
 
 def test_contextual_rules_count_drift_is_a_problem(repo: Path):
-    edit(repo, "CLAUDE.md", "Contextual rules (11)", "Contextual rules (0)")
+    edit(repo, "CLAUDE.md", "Contextual rules (12)", "Contextual rules (0)")
     problems, _ = vrr.check_claude_md_counts(src(repo))
     assert any("Contextual rules (0)" in p for p in problems), problems
 
@@ -504,7 +491,8 @@ def test_cli_exits_zero_on_the_real_repo(capsys):
 
 
 def test_cli_exits_one_on_problems(repo: Path, capsys):
-    edit(repo, ".claude/rules/DYNAMIC.md", f"{_FLOOR}–{_CEIL}", f"1999–{_CEIL}")
+    path = repo / ".claude/rules/02_hooks_and_permissions.md"
+    path.write_text(path.read_text() + f"\n~{_FLOOR}–{_CEIL} tokens\n", encoding="utf-8")
     assert vrr.main(["--root", str(repo)]) == 1
     assert "problem(s)" in capsys.readouterr().out
 

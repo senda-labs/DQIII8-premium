@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 DQIII8 Hook — SessionStart
-Injects project context, recent lessons, and system state.
+Injects the minimum operational baseline (project/model/next-step) plus a small
+set of conditionally-triggered blocks — see "Injection rules" comment below.
 """
 
 import json
@@ -33,7 +34,6 @@ try:
 except Exception:
     data = {}
 DB = JARVIS / "database" / "dqiii8.db"
-LESSONS = JARVIS / "tasks" / "lessons.md"
 FLAG = JARVIS / "tasks" / "audit_pending.flag"
 
 # ── Active project (Correction C fix: the old resolver globbed the
@@ -79,60 +79,33 @@ if pm.exists():
                 next_step = lines[i + 1].strip()
             break
 
-# ── Last 10 lessons ────────────────────────────────────────────────
-lessons = []
-if LESSONS.exists():
-    all_lines = LESSONS.read_text(encoding="utf-8").splitlines()
-    lessons = [l for l in all_lines if l.strip().startswith("[20")][-5:]
-
-# ── Last audit ─────────────────────────────────────────────────────
-audit_info = "No audit yet"
-try:
-    import sqlite3
-
-    if DB.exists():
-        conn = sqlite3.connect(str(DB), timeout=2)
-        row = conn.execute(
-            "SELECT timestamp,overall_score FROM audit_reports "
-            "ORDER BY timestamp DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
-        if row:
-            audit_info = f"{row[0][:10]} | Score: {row[1]}/100"
-except Exception as e:
-    _log.warning("audit-score DB failed: %s", e, exc_info=True)
-
-# ── Pending audit alert ────────────────────────────────────────────
+# ── Pending audit alert (also gates the "Last audit" line below —
+# a score with nothing pending isn't actionable at session start;
+# consultable on demand via /audit or the audit_reports table) ──────
 audit_alert = ""
+audit_info = ""
 if FLAG.exists():
     audit_alert = "\n⚠  AUDIT PENDING — run /audit now."
     try:
         FLAG.unlink()
     except Exception as e:
         _log.debug("audit-flag unlink skipped: %s", e)
+    try:
+        import sqlite3
 
-# ── Vault Memory — top-8 recent facts ─────────────────────────────
-vault_facts = []
-try:
-    import sqlite3 as _vsl3
-
-    if DB.exists():
-        _vc = _vsl3.connect(str(DB), timeout=2)
-        _vrows = _vc.execute(
-            "SELECT subject, predicate, object, entry_type FROM vault_memory "
-            "WHERE project=? OR project='' "
-            "ORDER BY CASE entry_type "
-            "  WHEN 'adr' THEN 1 "
-            "  WHEN 'project_state' THEN 2 "
-            "  WHEN 'lesson' THEN 3 "
-            "  WHEN 'checkpoint' THEN 4 "
-            "  ELSE 5 END, last_seen DESC LIMIT 8",
-            (project,),
-        ).fetchall()
-        _vc.close()
-        vault_facts = [f"{r[0]} {r[1]} {r[2]}" for r in _vrows]
-except Exception as e:
-    _log.warning("vault-memory DB failed: %s", e, exc_info=True)
+        if DB.exists():
+            conn = sqlite3.connect(str(DB), timeout=2)
+            try:
+                row = conn.execute(
+                    "SELECT timestamp,overall_score FROM audit_reports "
+                    "ORDER BY timestamp DESC LIMIT 1"
+                ).fetchone()
+            finally:
+                conn.close()
+            if row:
+                audit_info = f"\nLast audit: {row[0][:10]} | Score: {row[1]}/100"
+    except Exception as e:
+        _log.warning("audit-score DB failed: %s", e, exc_info=True)
 
 # ── Lazy context load ──────────────────────────────────────────────
 CONTEXT_DIR = JARVIS / "context"
@@ -162,42 +135,6 @@ if os.environ.get("JARVIS_PROPOSITO") == "1":
         _proposito_block = "\n\nPURPOSE:\n" + _proposito_path.read_text(
             encoding="utf-8"
         )
-
-# ── Recent memories (vault_memory SQLite) ─────────────────────────
-_memories_block = ""
-try:
-    import sys as _sys
-    import signal as _sig
-
-    _mm_path = JARVIS / "bin" / "memory_manager.py"
-    if _mm_path.exists():
-        import importlib.util as _ilu
-
-        import io as _io
-
-        _spec = _ilu.spec_from_file_location("memory_manager", str(_mm_path))
-        _mm = _ilu.module_from_spec(_spec)
-        import contextlib as _cl
-
-        with _cl.redirect_stderr(_io.StringIO()):
-            _spec.loader.exec_module(_mm)
-
-        def _timeout_handler(signum, frame):
-            raise TimeoutError
-
-        _sig.signal(_sig.SIGALRM, _timeout_handler)
-        _sig.alarm(2)
-        try:
-            _mems = _mm.search_memories(project, "previous session context", top_k=5)
-            _sig.alarm(0)
-            if _mems:
-                _memories_block = "\n\nRECENT MEMORIES:\n" + "\n".join(
-                    f"- {m}" for m in _mems
-                )
-        finally:
-            _sig.alarm(0)
-except Exception as e:
-    _log.debug("memory-manager skipped: %s", e)
 
 model = os.environ.get("DQIII8_MODEL", "claude-sonnet-5")
 
@@ -234,11 +171,14 @@ try:
 except Exception as e:
     _log.debug("mode read skipped: %s", e)
 
-_vault_block = ""
-if vault_facts:
-    _vault_block = "\n\nKNOWLEDGE BASE:\n" + "\n".join(f"- {f}" for f in vault_facts)
-
-_mode_line = f"\n{_MODE_BEHAVIORS[_mode]}" if _mode in _MODE_BEHAVIORS else ""
+# Only injected when the mode differs from the default — a default-mode
+# session doesn't need a line stating the default is in effect.
+_DEFAULT_MODE = "coder"
+_mode_line = (
+    f"\n{_MODE_BEHAVIORS[_mode]}"
+    if _mode in _MODE_BEHAVIORS and _mode != _DEFAULT_MODE
+    else ""
+)
 
 # ── Inter-session progress block ─────────────────────────────────
 _progress_block = ""
@@ -250,16 +190,36 @@ try:
 except Exception as e:
     _log.debug("progress-file read skipped: %s", e)
 
+# ── Injection rules (exact, by necessity — do not add a field here
+# without a named condition) ─────────────────────────────────────────
+# project, model, next_step  : ALWAYS (minimum operational baseline)
+# audit_alert + audit_info   : ONLY IF tasks/audit_pending.flag exists
+# _mode_line                 : ONLY IF active mode != "coder" (default)
+# _progress_block            : ONLY IF claude-progress.txt exists, non-empty
+# _user_profile_block        : ALWAYS (who the user is — not work history)
+# _channels_block            : ONLY IF project == "content"
+# _proposito_block           : ONLY IF env JARVIS_PROPOSITO=1
+# vault_memory / semantic search / lessons.md : NEVER auto-injected —
+#   query on demand (bin/memory_manager.py, tasks/lessons.md, vault_memory
+#   table) when the task actually needs them.
 ctx = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DQIII8 — {datetime.now().strftime('%Y-%m-%d %H:%M')}
 Model   : {model}
 Project : {project}
-Next    : {next_step}{audit_alert}
-Last audit: {audit_info}{_mode_line}{_progress_block}{_vault_block}{_memories_block}{_user_profile_block}{_channels_block}{_proposito_block}
-
-RECENT LESSONS:
-{chr(10).join(lessons) if lessons else '  (none yet)'}
+Next    : {next_step}{audit_alert}{audit_info}{_mode_line}{_progress_block}{_user_profile_block}{_channels_block}{_proposito_block}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
+_log.info(
+    "injected source=%s blocks: audit=%s mode=%s progress=%s profile=%s "
+    "channels=%s proposito=%s chars=%d",
+    data.get("source", "?"),
+    bool(audit_alert or audit_info),
+    bool(_mode_line),
+    bool(_progress_block),
+    bool(_user_profile_block),
+    bool(_channels_block),
+    bool(_proposito_block),
+    len(ctx),
+)
 print(json.dumps({"additionalContext": ctx}))
 sys.exit(0)

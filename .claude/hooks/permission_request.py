@@ -18,6 +18,7 @@ Output via stdout: {"decision": "allow"|"deny", "reason": "..."}
 
 import json
 import logging
+import logging.handlers
 import os
 import sqlite3
 import sys
@@ -25,6 +26,17 @@ import time
 from pathlib import Path
 
 log = logging.getLogger("dqiii8." + __name__)
+if not log.handlers:
+    log.setLevel(logging.DEBUG)
+    _log_dir = Path("/var/log/dqiii8")
+    if _log_dir.exists():
+        _fh = logging.handlers.RotatingFileHandler(
+            str(_log_dir / "hooks.log"), maxBytes=2_000_000, backupCount=3
+        )
+        _fh.setFormatter(logging.Formatter("%(asctime)s [permission_request] %(levelname)s %(message)s"))
+        log.addHandler(_fh)
+    else:
+        log.addHandler(logging.NullHandler())
 
 DQIII8_ROOT = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
 DB = DQIII8_ROOT / "database" / "dqiii8.db"

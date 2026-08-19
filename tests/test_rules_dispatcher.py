@@ -8,9 +8,9 @@ Two invariants this file exists to protect:
   1. Every alias in `_REGISTRY` is reachable by some real tool call AND points
      at a file that exists (the `routing.md` / `performance.md` class of bug,
      in both directions).
-  2. The token budget quoted in the dispatcher docstring, `DYNAMIC.md` and
-     `02_hooks_and_permissions.md` matches what `token_estimate()` actually
-     returns today.
+  2. The token budget quoted in the dispatcher docstring matches what
+     `token_estimate()` actually returns today (`02_hooks_and_permissions.md`
+     must never restate the numbers, only point at the docstring).
 """
 
 import sys
@@ -213,7 +213,7 @@ def test_token_budget_matrix(tool, tool_input, label):
     assert tokens <= MEASURED_CEILING, (
         f"{label}: {tokens} tokens exceeds the documented ceiling "
         f"{MEASURED_CEILING} — re-measure and update rules_dispatcher.py's "
-        f"docstring and DYNAMIC.md together."
+        f"docstring."
     )
 
 
@@ -226,7 +226,7 @@ def test_token_budget_floor_is_always_set_only():
     assert rd.token_estimate(bare) == MEASURED_FLOOR, (
         f"measured floor {rd.token_estimate(bare)} != documented "
         f"{MEASURED_FLOOR} — re-measure and update rules_dispatcher.py's "
-        "docstring and DYNAMIC.md together."
+        "docstring."
     )
 
 
@@ -242,7 +242,7 @@ def test_documented_ceiling_bounds_every_reachable_path(tool, tool_input, label)
     assert tokens <= MEASURED_CEILING, (
         f"{label}: {tokens} tokens exceeds the documented ceiling "
         f"{MEASURED_CEILING}. Shrink the rule files, or re-publish the ceiling "
-        "in rules_dispatcher.py's docstring and DYNAMIC.md."
+        "in rules_dispatcher.py's docstring."
     )
 
 

@@ -16,16 +16,30 @@ v7 changes (ADR-001 corrections):
 
 import json
 import logging
+import logging.handlers
 import os
 import re
 import sys
 import time
+from pathlib import Path
 
 log = logging.getLogger("dqiii8." + __name__)
+if not log.handlers:
+    log.setLevel(logging.DEBUG)
+    _log_dir = Path("/var/log/dqiii8")
+    if _log_dir.exists():
+        _fh = logging.handlers.RotatingFileHandler(
+            str(_log_dir / "hooks.log"), maxBytes=2_000_000, backupCount=3
+        )
+        _fh.setFormatter(logging.Formatter("%(asctime)s [pre_tool_use] %(levelname)s %(message)s"))
+        log.addHandler(_fh)
+    else:
+        log.addHandler(logging.NullHandler())
 
 try:
     data = json.load(sys.stdin)
-except Exception:
+except Exception as e:
+    log.warning("pre_tool_use: stdin parse failed: %s", e)
     sys.exit(0)
 
 tool = data.get("tool_name", "")

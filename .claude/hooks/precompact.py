@@ -45,38 +45,39 @@ except Exception:
 # session-scoped project resolution postcompact.py depends on.
 SESSION_ID = data.get("session_id", "unknown")
 
+# Only session_id/project/actions_count are stored: those are the only
+# fields postcompact.py reads back. tokens_so_far/compact_trigger/started_at
+# were computed here but never consumed — dropped, not "by necessity".
 state: dict = {
-    "timestamp": datetime.now().isoformat(),
     "session_id": SESSION_ID,
-    "compact_trigger": data.get("trigger", "unknown"),
 }
 
 # ── Read last session stats from DB ────────────────────────────────
 try:
     conn = sqlite3.connect(str(DB), timeout=3)
-    row = conn.execute(
-        "SELECT project, start_time FROM sessions WHERE session_id=? LIMIT 1",
-        (SESSION_ID,),
-    ).fetchone()
-    if row:
-        state["project"] = row[0]
-        state["started_at"] = row[1]
+    try:
+        row = conn.execute(
+            "SELECT project FROM sessions WHERE session_id=? LIMIT 1",
+            (SESSION_ID,),
+        ).fetchone()
+        if row:
+            state["project"] = row[0]
 
-    actions_row = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(tokens_used),0) FROM agent_actions " "WHERE session_id=?",
-        (SESSION_ID,),
-    ).fetchone()
-    if actions_row:
-        state["actions_count"] = actions_row[0]
-        state["tokens_so_far"] = actions_row[1]
+        actions_row = conn.execute(
+            "SELECT COUNT(*) FROM agent_actions WHERE session_id=?",
+            (SESSION_ID,),
+        ).fetchone()
+        if actions_row:
+            state["actions_count"] = actions_row[0]
 
-    # Increment compact_count in sessions (best-effort)
-    conn.execute(
-        "UPDATE sessions SET compact_count = COALESCE(compact_count,0) + 1 " "WHERE session_id=?",
-        (SESSION_ID,),
-    )
-    conn.commit()
-    conn.close()
+        # Increment compact_count in sessions (best-effort)
+        conn.execute(
+            "UPDATE sessions SET compact_count = COALESCE(compact_count,0) + 1 " "WHERE session_id=?",
+            (SESSION_ID,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 except Exception as e:
     _log.warning("db-stats read failed: %s", e, exc_info=True)
 
@@ -85,6 +86,8 @@ try:
     STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
 except Exception as e:
     _log.warning("state-file write failed: %s", e, exc_info=True)
+
+_log.info("state saved: %s", json.dumps(state, ensure_ascii=False))
 
 # PreCompact must output {} and exit 0 (never abort compaction)
 print(json.dumps({}))
