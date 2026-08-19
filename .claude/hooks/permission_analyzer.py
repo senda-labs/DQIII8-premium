@@ -2556,13 +2556,6 @@ class PermissionAnalyzer:
                     "Autonomous mode does not waive this.",
                 )
 
-        # 3b. Resource claims — block if another agent holds the file
-        if tool in ("Edit", "Write", "MultiEdit"):
-            path = inp.get("file_path", inp.get("path", ""))
-            claim_deny = self._check_resource_claim(tool, path, _session)
-            if claim_deny:
-                return claim_deny
-
         # Extract Bash command once for all Bash checks (3c, 4, 4b).
         # 2026-08-18: mcp__context-mode__ctx_execute* is an arbitrary
         # sandboxed-exec surface, allow-listed and actively steered to over
@@ -3095,53 +3088,6 @@ class PermissionAnalyzer:
         except Exception:
             return False
 
-    def _check_resource_claim(
-        self, tool: str, path: str, session_id: str
-    ) -> dict | None:
-        """
-        Blocks if another agent/session holds an active claim on this resource.
-        Claims expire automatically by TTL (expires_at).
-        """
-        if not path:
-            return None
-        try:
-            conn = sqlite3.connect(str(DB_PATH), timeout=10)
-            row = conn.execute(
-                """
-                SELECT agent, session_id FROM resource_claims
-                WHERE resource = ?
-                  AND session_id != ?
-                  AND expires_at > datetime('now')
-                LIMIT 1
-                """,
-                (path, session_id),
-            ).fetchone()
-            conn.close()
-            if row:
-                holder_agent, holder_session = row
-                return self._deny(
-                    tool,
-                    path,
-                    f"Resource '{path}' locked by agent '{holder_agent}' "
-                    f"(session {holder_session[:8]}…). Wait for the claim to expire.",
-                    "MEDIUM",
-                    "resource_claim",
-                    "Wait 30 min or ask the owning agent to release the resource.",
-                )
-        except Exception as e:
-            # Fail CLOSED, same contract as block 4b: a check that ran and
-            # errored is not a check that passed. Returning None here made the
-            # multi-agent write lock silently cease to exist whenever the DB was
-            # locked/missing/corrupt.
-            log.warning("permission_analyzer: _check_resource_claim query failed: %s", e, exc_info=True)
-            return self._deny(
-                tool, path,
-                f"Internal analyzer error ({type(e).__name__}) during "
-                "resource-claim check — denying as precaution.",
-                "HIGH", "analyzer_internal_error",
-                "Retry once the permissions DB is reachable.",
-            )
-        return None
 
     def _check_budget(self, session_id: str) -> dict | None:
         """Blocks if estimated session cost exceeds MAX_SESSION_COST_USD."""
