@@ -3,15 +3,17 @@ DQIII8 — Rules Dispatcher (RAG de Reglas Dinámico)
 Inyecta SÓLO las reglas relevantes al contexto del tool en curso.
 
 En lugar de cargar el corpus de reglas entero en cada turno, este módulo mapea
-tool + input → subconjunto mínimo de reglas (~1211–8614 tokens, cl100k_base real).
+tool + input → subconjunto mínimo de reglas (~1211–8888 tokens, cl100k_base real).
 El número de archivos del registro no se cita aquí: el recuento vivo es
 `len(_REGISTRY)` y su parte de rules_db/ está fijada en CLAUDE.md
 ("Contextual rules (N)"), validada por check_claude_md_counts().
 
 RANGO CANÓNICO (medido con token_estimate(), cl100k_base real vía tiktoken):
-**suelo 1211** (solo _ALWAYS = ops + core-behavior), **techo 8614**. Suelo de
+**suelo 1211** (solo _ALWAYS = ops + core-behavior), **techo 8888**. Suelo de
 sesión 2599 (suelo + CLAUDE.md, el único fichero que Claude Code auto-inyecta en
-toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md.
+toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md; techo
+re-medido el mismo día tras añadir la sección "Parallel-agent sessions" a
+git-safety.md (Rango 3, red-team audit).
 
 El techo es el MÁXIMO REALMENTE ALCANZABLE, no el peor caso de la matriz
 representativa: un Bash que combina todas las keywords de _BASH_KEYWORD_RULES
