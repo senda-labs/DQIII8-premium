@@ -82,7 +82,7 @@ except Exception as _e:
     log.error("pre_tool_use: PermissionAnalyzer crashed — failing closed: %s", _e, exc_info=True)
     result = {
         "decision": "DENY",
-        "reason": f"analyzer_error:{_e} — failing closed for safety",
+        "reason": f"analyzer_error:{type(_e).__name__} — failing closed for safety",
         "risk_level": "CRITICAL",
         "rule_triggered": "analyzer_crash",
         "suggested_fix": "Fix the analyzer error, then retry.",
@@ -108,6 +108,10 @@ if result["decision"] in ("DENY", "ESCALATE"):
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
+# _model_tier()/_tier_text() below are hook-local, not shared with stop.py's
+# near-identical _tier_for_model(): each hook runs as its own subprocess and a
+# shared bin/core import adds sys.path fragility for a ~10-line function.
+# If the tier taxonomy (C/B/A/S) ever changes, update both.
 def _model_tier(model_id: str) -> int:
     m = model_id.lower()
     if "ollama" in m or "qwen2.5-coder" in m:

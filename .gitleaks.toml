@@ -149,8 +149,6 @@ regexes = [
     # Test fixtures (truncated / fake values)
     '''sk-ant-oat01-truncated''',
     '''sk-ant-api03-QQQQWWWWEEEERRRRTTTT''',
-    '''sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789''',
-    '''sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWx''',
 
     # Regex pattern definitions in source code (db_security.py etc.)
     '''r"ghp_''',

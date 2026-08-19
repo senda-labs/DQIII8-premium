@@ -97,6 +97,21 @@ def test_no_reachable_alias_is_unregistered():
     assert not dangling, f"mappings reference unregistered aliases: {sorted(dangling)}"
 
 
+def test_bash_agent_pattern_matches_real_entry_points_not_bare_agent():
+    """`bin/agents|bin/core/dispatch|\\borchestrat` (RC 2026-08-19) replaced the
+    dead `Agent\\(`/`dispatch_agent` alternatives with the real code paths, and
+    dropped the bare `\\bagent\\b` trigger (retired 2026-08-19, too broad —
+    matched any incidental mention of the English word "agent")."""
+    for cmd in ("ls bin/agents/", "python3 bin/core/dispatch.py --help"):
+        injected = rd.get_rules("Bash", {"command": cmd})
+        assert "Escalation to Opus" in injected or "Plan Gate" in injected, (
+            f"expected plan-gate rules injected for {cmd!r}"
+        )
+    # The bare word alone must NOT trigger — it's not a real code path.
+    injected = rd.get_rules("Bash", {"command": "list every agent in the roster"})
+    assert "Escalation to Opus" not in injected and "Plan Gate" not in injected
+
+
 def test_governance_and_agent_aliases_all_resolve():
     """Every _REGISTRY alias — reachable or not — points at an existing file."""
     missing = {
@@ -131,7 +146,9 @@ BUDGET_MATRIX = [
     ("Bash", {"command": "ls"}, "bash-no-keyword"),
     # NB: keep this command free of other trigger words ("cc", "python3", …) —
     # it is the single-trigger ceiling case, not a combined worst case.
-    ("Bash", {"command": "dq agent orchestrator status"}, "bash-agent-keyword"),
+    # "agent" alone is not a trigger (retired 2026-08-19, too broad); this
+    # command matches via \borchestrat only — label reflects that.
+    ("Bash", {"command": "dq agent orchestrator status"}, "bash-orchestrat-keyword"),
     ("Bash", {"command": "git status"}, "bash-git"),
     ("Bash", {"command": "python3 script.py"}, "bash-python"),
     ("Bash", {"command": "sqlite3 database/dqiii8.db '.tables'"}, "bash-sqlite3"),
@@ -178,24 +195,11 @@ BUDGET_MATRIX = [
 # The two structurally distinct maxima an agent can actually hit in one call.
 # The matrix worst case is a Bash command; the Edit branch is a separate ridge
 # the Bash probe cannot see. The published ceiling must bound BOTH.
-TRUE_MAX_PROBES = [
-    (
-        "Bash",
-        {
-            "command": "git python3 sqlite3 schema_v2 systemctl claude agent "
-            "orchestrator tmux intl-reports firecrawl"
-        },
-        "bash-all-keywords",
-    ),
-    (
-        "Edit",
-        {
-            "file_path": "/root/dqiii8/database/.claude/hooks/"
-            "openrouter_wrapper_domain_agent.py"
-        },
-        "edit-hooks-tiering-db-py",
-    ),
-]
+# Reused from validate_rules_registry.py's _CEILING_PROBES (same probes, same
+# achievability role) instead of a second hand-maintained copy — the two used
+# to drift silently (found 2026-08-19: a Bash trigger change needed updating
+# both, and only one got updated).
+TRUE_MAX_PROBES = list(vrr._CEILING_PROBES)
 
 
 @pytest.mark.parametrize("tool,tool_input,label", BUDGET_MATRIX)

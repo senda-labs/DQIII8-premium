@@ -499,6 +499,10 @@ def _pricing_for_model(model_id: str):
 
 
 def _tier_for_model(model_id: str) -> str | None:
+    # Deliberately hook-local, not shared with pre_tool_use.py's near-identical
+    # _tier_text()/_model_tier(): each hook runs as its own subprocess and a
+    # shared bin/core import adds sys.path fragility for a ~10-line function.
+    # If the tier taxonomy (C/B/A/S) ever changes, update both.
     m = (model_id or "").lower()
     if "opus" in m:
         return "S"
@@ -699,17 +703,34 @@ except Exception as e:
     _log.warning("auto-commit failed", exc_info=True)
 
 # ── 2b. Git push after auto-commit ────────────────────────────────
+# premium (not origin): origin is the public repo and must stay vanilla —
+# only tasks/lessons.md + projects/*.md are auto-committed above and both are
+# gitignored today, but a push target must not depend on that staying true.
+# Pushes whatever branch the session is actually on (never hardcode "main":
+# local main and premium/main have diverged — 611/734 commits either way as
+# of 2026-08-19 — so a push to premium's main ref is rejected non-fast-forward
+# until a human resolves that divergence; premium-main tracks premium/main
+# cleanly and pushes succeed there today).
 try:
+    branch = (
+        subprocess.run(
+            ["git", "-C", str(JARVIS), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        or "main"
+    )
     result = subprocess.run(
-        ["git", "push", "origin", "master"],
+        ["git", "push", "premium", branch],
         cwd=str(JARVIS),
         capture_output=True,
         timeout=30,
     )
     if result.returncode == 0:
-        print("[stop] git push OK")
+        print(f"[stop] git push premium {branch} OK")
     else:
-        print(f"[stop] git push failed: {result.stderr.decode()[:100]}")
+        print(f"[stop] git push premium {branch} failed: {result.stderr.decode()[:300]}")
 except Exception as e:
     print(f"[stop] git push error: {e}")
 
@@ -845,8 +866,17 @@ duration: {_duration_str}
                     timeout=10,
                 )
             if not _already_committed_today:
+                _branch = (
+                    subprocess.run(
+                        ["git", "-C", str(JARVIS), "rev-parse", "--abbrev-ref", "HEAD"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                    ).stdout.strip()
+                    or "main"
+                )
                 subprocess.run(
-                    ["git", "-C", str(JARVIS), "push", "origin", "master"],
+                    ["git", "-C", str(JARVIS), "push", "premium", _branch],
                     capture_output=True,
                     timeout=20,
                 )
@@ -859,7 +889,7 @@ try:
     import sys as _spc_sys
 
     _spc_sys.path.insert(0, str(JARVIS))
-    from bin.audit_trigger import check_triggers
+    from bin.monitoring.audit_trigger import check_triggers
 
     _spc_result = check_triggers(session_id=session)
     if _spc_result.get("trigger"):
@@ -893,17 +923,6 @@ except Exception as _spc_e:
                 )
     except Exception as _e:
         _log.warning("spc-fallback failed", exc_info=True)
-
-# ── 6. Sync context-mode events → agent_actions ───────────────────
-try:
-    import sys as _sys
-
-    _sys.path.insert(0, str(JARVIS))
-    from bin.observe_events import sync_context_mode_events
-
-    sync_context_mode_events(project_dir=str(JARVIS))
-except Exception as _oe:
-    print(f"[observe_events] sync skipped: {_oe}")
 
 # ── 7. Regenerate claude-progress.txt ────────────────────────────────
 try:

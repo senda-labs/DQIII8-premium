@@ -409,7 +409,7 @@ def check_token_budget(src: Source) -> tuple[list[str], list[str]]:
         if len(found) < expected_min:
             problems.append(
                 f"{rel}: expected at least {expected_min} citation(s) of the "
-                f"token range '{floor}-{ceiling}', found {len(found)}. The four "
+                f"token range '{floor}-{ceiling}', found {len(found)}. The two "
                 "sites that quote this number must be updated together."
             )
         for raw_lo, raw_hi in found:
@@ -439,7 +439,7 @@ def check_token_budget(src: Source) -> tuple[list[str], list[str]]:
 
     # 02_hooks_and_permissions.md is itself injected and itself counts toward
     # the ceiling it used to describe. It must point at the docstring, never
-    # restate the numbers — a fourth citation site is a fourth thing to drift.
+    # restate the numbers — a third citation site is a third thing to drift.
     hp_text = src.read(HOOKS_PERMS_MD)
     if hp_text is None:
         problems.append(f"cannot read {HOOKS_PERMS_MD}")
@@ -464,7 +464,7 @@ _CEILING_PROBES = (
     (
         "Bash",
         {
-            "command": "git python3 sqlite3 schema_v2 systemctl claude agent "
+            "command": "git python3 sqlite3 schema_v2 systemctl claude "
             "orchestrator tmux intl-reports firecrawl"
         },
         "bash-all-keywords",
@@ -506,11 +506,18 @@ def _render_injection(rd, aliases) -> str:
 def _reachable_alias_sets(rd) -> list[tuple[str, list[str]]]:
     """Every alias set get_rules() can emit, DERIVED FROM THE DISPATCHER TABLES.
 
-    Exhaustive by construction rather than by luck: a new `_BASH_KEYWORD_RULES`
-    row, a new `_EXT_RULES` extension or a new `_TOOL_RULES` entry enters the
-    ceiling automatically. The prior hand-written probe string could not do this
-    — it hit every alias group only by coincidence, so any added trigger would
-    have silently under-measured the ceiling forever.
+    Exhaustive by construction for the three declarative tables: a new
+    `_BASH_KEYWORD_RULES` row, `_EXT_RULES` extension or `_TOOL_RULES` entry
+    enters the ceiling automatically. The prior hand-written probe string could
+    not do this — it hit every alias group only by coincidence, so any added
+    trigger would have silently under-measured the ceiling forever.
+
+    One exception, NOT exhaustive by construction: get_rules()'s Edit/Write
+    path-substring branches (`.claude/hooks`, `openrouter_wrapper`/`director.py`/
+    `domain_agent`, `database/`) live as inline `if` statements in the AST, not
+    a table — this function mirrors them by hand in `_EDIT_PATH_BRANCH_ALIASES`.
+    A new path-substring branch added to get_rules() needs a matching manual
+    update here too, or the ceiling silently under-measures again.
     """
     always = list(rd._ALWAYS)
     sets: list[tuple[str, list[str]]] = [("floor:_ALWAYS-only", always)]
@@ -1198,16 +1205,19 @@ def check_file_citations_exist(src: Source) -> tuple[list[str], list[str]]:
 COMMANDS_DIR = ".claude/commands"
 SKILLS_DIR = ".claude/skills"
 
-# A pointer file is short and names its SKILL.md. Measured on the live corpus
-# (2026-08-18): the one real pointer, commands/handover.md, has a 1-line body
-# once its `>` SSOT annotation is stripped; the smallest *duplicating* command
-# body is 31 lines (`audit`). 15 sits in the middle of that gap.
+# A pointer file is short and names its SKILL.md. Most `.claude/commands/*.md`
+# files are now pointer stubs (a few lines with an `>` SSOT annotation) rather
+# than full duplicates — re-measure with a one-liner before trusting a specific
+# line count here: `for f in .claude/commands/*.md; do wc -l "$f"; done`.
+# 15 was chosen to sit clear of both pointer-stub and duplicating-body lengths
+# as last measured; re-check it hasn't drifted if this check starts flagging
+# false positives/negatives.
 _POINTER_MAX_LINES = 15
 # Below this ratio the two copies have genuinely forked rather than drifted by a
-# few edits. Measured across the 10 duplicated pairs the distribution is
-# strongly bimodal: skill-create 0.06, weekly-review 0.51, mode 0.56, then a gap
-# to audit 0.82 ... mobilize 1.00. 0.60 lands in that gap, so it separates real
-# content forks from near-identical copies without hand-tuning per pair.
+# few edits. Re-measure per-pair ratios rather than trusting a fixed example
+# list here — the set of duplicated (non-pointer) pairs shrinks over time as
+# more commands convert to pointer stubs. 0.60 was chosen to sit in a gap
+# between near-identical copies and genuine forks as last measured.
 _PARITY_MIN_RATIO = 0.60
 
 
@@ -1388,27 +1398,33 @@ def check_command_skill_parity(src: Source) -> tuple[list[str], list[str]]:
 # ── check 8: constant lists match prose ──────────────────────────────────────
 
 PERMISSION_ANALYZER = ".claude/hooks/permission_analyzer.py"
-HOOKS_MD = ".claude/rules/02_hooks_and_permissions.md"
+
+
+def _code_string_list(src: Source, const_name: str) -> list[str] | None:
+    """A top-level `NAME = [...]` string-literal list from permission_analyzer.py,
+    in source order. `None` if the file can't be read or the list can't be
+    found (caller reports that as a problem, not a silent skip)."""
+    text = src.read(PERMISSION_ANALYZER)
+    if text is None:
+        return None
+    m = re.search(rf"^{const_name} = \[(.*?)^\]", text, re.S | re.M)
+    if not m:
+        return None
+    return re.findall(r'"([^"]+)"', m.group(1))
 
 
 def _code_blocked_paths(src: Source) -> list[str] | None:
     """The live `BLOCKED_PATHS` list from permission_analyzer.py, as string
     literals in source order. `None` if the file can't be read or the list
     can't be found (caller reports that as a problem, not a silent skip)."""
-    text = src.read(PERMISSION_ANALYZER)
-    if text is None:
-        return None
-    m = re.search(r"^BLOCKED_PATHS = \[(.*?)^\]", text, re.S | re.M)
-    if not m:
-        return None
-    return re.findall(r'"([^"]+)"', m.group(1))
+    return _code_string_list(src, "BLOCKED_PATHS")
 
 
 def check_constant_lists_match_prose(src: Source) -> tuple[list[str], list[str]]:
-    """`02_hooks_and_permissions.md`'s "Blocked paths" line restates
-    `BLOCKED_PATHS` inline (backtick-comma list) instead of linking to code:
-    the list grew from 11 to 21 entries in one edit and the doc line had to be
-    hand-edited to keep up, with nothing that would fail if a future edit
+    """`02_hooks_and_permissions.md` restates three security lists inline
+    (backtick-comma prose) instead of linking to code: `BLOCKED_PATHS` (grown
+    from 11 to 23 entries across several edits), `GOVERNANCE_PATHS`, and
+    `ALLOWED_DELETIONS`. Each had nothing that would fail if a future edit
     forgot one side. Hard-fail: an out-of-sync prose restatement of a security
     allow/deny list is a doc that lies about what the code actually blocks.
     """
@@ -1420,15 +1436,15 @@ def check_constant_lists_match_prose(src: Source) -> tuple[list[str], list[str]]
         problems.append(f"cannot find BLOCKED_PATHS in {PERMISSION_ANALYZER}")
         return problems, warnings
 
-    doc_text = src.read(HOOKS_MD)
+    doc_text = src.read(HOOKS_PERMS_MD)
     if doc_text is None:
-        problems.append(f"cannot read {HOOKS_MD}")
+        problems.append(f"cannot read {HOOKS_PERMS_MD}")
         return problems, warnings
 
     for path in code_paths:
         if f"`{path}`" not in doc_text:
             problems.append(
-                f"{HOOKS_MD}: BLOCKED_PATHS entry `{path}` (in {PERMISSION_ANALYZER}) "
+                f"{HOOKS_PERMS_MD}: BLOCKED_PATHS entry `{path}` (in {PERMISSION_ANALYZER}) "
                 "is not cited in the doc's Blocked paths restatement."
             )
 
@@ -1447,12 +1463,88 @@ def check_constant_lists_match_prose(src: Source) -> tuple[list[str], list[str]]
                 continue
             if cited not in code_set:
                 problems.append(
-                    f"{HOOKS_MD}: cites `{cited}` in the Blocked paths list, "
+                    f"{HOOKS_PERMS_MD}: cites `{cited}` in the Blocked paths list, "
                     f"which is not in BLOCKED_PATHS in {PERMISSION_ANALYZER} "
                     "(stale or invented entry)."
                 )
 
+    problems.extend(_check_governance_paths_prose(src))
+    problems.extend(_check_allowed_deletions_prose(src))
+
     return problems, warnings
+
+
+def _check_governance_paths_prose(src: Source) -> list[str]:
+    """`02_hooks_and_permissions.md`'s "Governance paths" line restates
+    `GOVERNANCE_PATHS` inline, same drift risk as BLOCKED_PATHS above."""
+    problems: list[str] = []
+    code_paths = _code_string_list(src, "GOVERNANCE_PATHS")
+    if code_paths is None:
+        problems.append(f"cannot find GOVERNANCE_PATHS in {PERMISSION_ANALYZER}")
+        return problems
+    doc_text = src.read(HOOKS_PERMS_MD)
+    if doc_text is None:
+        problems.append(f"cannot read {HOOKS_PERMS_MD}")
+        return problems
+
+    for path in code_paths:
+        if f"`{path}`" not in doc_text:
+            problems.append(
+                f"{HOOKS_PERMS_MD}: GOVERNANCE_PATHS entry `{path}` (in "
+                f"{PERMISSION_ANALYZER}) is not cited in the doc's Governance "
+                "paths restatement."
+            )
+
+    code_set = set(code_paths)
+    m = re.search(r"\*\*Governance paths.*?\n(?=This corpus)", doc_text, re.S)
+    if m:
+        for cited in re.findall(r"`([^`]+)`", m.group(0)):
+            if cited in ("GOVERNANCE_PATHS", "permission_analyzer.py"):
+                continue
+            if cited not in code_set:
+                problems.append(
+                    f"{HOOKS_PERMS_MD}: cites `{cited}` in the Governance paths "
+                    f"list, which is not in GOVERNANCE_PATHS in "
+                    f"{PERMISSION_ANALYZER} (stale or invented entry)."
+                )
+    return problems
+
+
+def _check_allowed_deletions_prose(src: Source) -> list[str]:
+    """`02_hooks_and_permissions.md`'s carve-out paragraph restates
+    `ALLOWED_DELETIONS` inline mid-sentence — narrower span than the other two
+    (the surrounding prose is full of unrelated backtick-quoted function/
+    constant names), so the reverse-direction scan targets only the clause
+    between "allowed-deletion name —" and the following sentence boundary."""
+    problems: list[str] = []
+    code_paths = _code_string_list(src, "ALLOWED_DELETIONS")
+    if code_paths is None:
+        problems.append(f"cannot find ALLOWED_DELETIONS in {PERMISSION_ANALYZER}")
+        return problems
+    doc_text = src.read(HOOKS_PERMS_MD)
+    if doc_text is None:
+        problems.append(f"cannot read {HOOKS_PERMS_MD}")
+        return problems
+
+    for path in code_paths:
+        if f"`{path}`" not in doc_text:
+            problems.append(
+                f"{HOOKS_PERMS_MD}: ALLOWED_DELETIONS entry `{path}` (in "
+                f"{PERMISSION_ANALYZER}) is not cited in the doc's carve-out "
+                "restatement."
+            )
+
+    code_set = set(code_paths)
+    m = re.search(r"allowed-deletion name —(.*?)\. All-or-nothing", doc_text, re.S)
+    if m:
+        for cited in re.findall(r"`([^`]+)`", m.group(0)):
+            if cited not in code_set:
+                problems.append(
+                    f"{HOOKS_PERMS_MD}: cites `{cited}` in the ALLOWED_DELETIONS "
+                    f"list, which is not in ALLOWED_DELETIONS in "
+                    f"{PERMISSION_ANALYZER} (stale or invented entry)."
+                )
+    return problems
 
 
 # ── check 9: no unresolved audit-ID comments ─────────────────────────────────
@@ -1500,6 +1592,197 @@ def check_no_audit_id_comments(src: Source) -> tuple[list[str], list[str]]:
     return problems, warnings
 
 
+# ── check: alias-reach counts ("2 / 13 / 4") ─────────────────────────────────
+# The floor (2 _ALWAYS aliases), reachable ceiling (13, one Bash command hitting
+# every _BASH_KEYWORD_RULES pattern) and `git status`'s own injection count (4)
+# are hardcoded, unenforced prose in CLAUDE.md and 02_hooks_and_permissions.md.
+# Derived analytically from the dispatcher's own tables (same primitives as
+# _measured_range_problems above) rather than a hand re-count, so a new
+# _BASH_KEYWORD_RULES row or registry alias updates the live numbers
+# automatically. DYNAMIC.md deliberately does NOT restate these numbers (it
+# points at rules_dispatcher.py's docstring instead, to keep its own token
+# footprint down) — do not add a DYNAMIC_MD entry here unless DYNAMIC.md's
+# prose is made to cite a number again; an entry whose regex can never match
+# passes silently and gives no real coverage (this happened once already,
+# 2026-08-19, when the prose it matched was trimmed in the same commit that
+# added the pattern — see test_every_alias_count_pattern_matches below).
+
+_ALIAS_COUNT_PATTERNS = {
+    "CLAUDE.md": {
+        "floor": re.compile(r"(\d+) files minimum"),
+        "ceiling": re.compile(r"(\d+) in the reachable ceiling case"),
+    },
+    HOOKS_PERMS_MD: {
+        "floor": re.compile(r"floor is the (\d+) `_ALWAYS`"),
+        "ceiling": re.compile(r"reachable ceiling is (\d+)"),
+        "git_status": re.compile(r"git status.? already injects (\d+)"),
+    },
+}
+
+
+def _alias_count_for_set(rd, aliases: list[str]) -> int:
+    """Unique, registry-resolvable alias count for one reachable set — same
+    dedup rule get_rules() applies before rendering, but counting instead of
+    reading file content."""
+    seen: set[str] = set()
+    for alias in aliases:
+        if alias in rd._REGISTRY:
+            seen.add(alias)
+    return len(seen)
+
+
+def _alias_count_via_get_rules(rd, tool: str, tool_input: dict) -> int:
+    """Live unique-alias count get_rules() would inject for one call, measured
+    by making `_read` return the bare alias name (no internal "\\n\\n") so the
+    "\\n\\n"-joined block's separator count equals the alias count exactly."""
+    orig_read = rd._read
+    try:
+        rd._read = lambda alias: alias
+        text = rd.get_rules(tool, tool_input)
+    finally:
+        rd._read = orig_read
+    return text.count("\n\n") if text else 0
+
+
+def check_alias_reach_counts(src: Source) -> tuple[list[str], list[str]]:
+    """CLAUDE.md / 02_hooks_and_permissions.md must each state the live
+    "2 / 13 / 4" alias-reach facts, not a stale hand-written guess."""
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    if src.root.resolve() != ROOT.resolve():
+        return problems, warnings  # only the real repo can be measured
+
+    try:
+        import rules_dispatcher as rd  # noqa: PLC0415
+    except Exception as exc:
+        return [f"cannot import rules_dispatcher to measure alias-reach counts: {exc}"], warnings
+
+    live = {
+        "floor": len(rd._ALWAYS),
+        "ceiling": max(
+            (_alias_count_for_set(rd, aliases) for _label, aliases in _reachable_alias_sets(rd)),
+            default=0,
+        ),
+        "git_status": _alias_count_via_get_rules(rd, "Bash", {"command": "git status"}),
+    }
+
+    for rel, patterns in _ALIAS_COUNT_PATTERNS.items():
+        text = src.read(rel)
+        if text is None:
+            problems.append(f"cannot read {rel}")
+            continue
+        for label, pat in patterns.items():
+            m = pat.search(text)
+            if not m:
+                continue  # this file doesn't cite that particular number
+            declared = int(m.group(1))
+            if declared != live[label]:
+                problems.append(
+                    f"{rel}: states {label}={declared} but the live measured "
+                    f"{label} is {live[label]} — re-measure and update."
+                )
+
+    return problems, warnings
+
+
+# ── check: no newly-committed audit docs ─────────────────────────────────────
+# CLAUDE.md's "never committed — full stop" rule was prose only, with no
+# mechanical enforcement — every neighboring invariant in this governance
+# corpus is validator- or DB-trigger-backed, this one wasn't.
+# --staged-only: a newly-*added* (git status "A") file under either gitignored
+# audit-doc prefix means it was force-added (`git add -f`), bypassing
+# .gitignore. The grandfathered `af869db` corpus is untouched — those 35
+# files, if ever edited, show as "M" (modified), never "A".
+_AUDIT_DOC_PREFIXES = ("docs/audits/", "database/audit_reports/")
+
+
+def _added_audit_doc_problems(name_status_z: str) -> list[str]:
+    """Shared core: given `-z`-separated `git diff --name-status` output, flag
+    every added/renamed-into path under an audit-doc prefix. Used by both the
+    pre-commit path (staged diff) and the CI path (base...target diff) so the
+    two enforcement points can't drift apart.
+
+    -z (NUL-separated, no quoting/octal-escaping of non-ASCII or space-bearing
+    paths) with rename detection left on: a rename/copy record is STATUS\0OLD\0NEW\0,
+    a plain record is STATUS\0PATH\0. Renames land the new path under the audit
+    prefix without ever going through "A" (git's default rename detection emits
+    R<score>, not A+D) — treat R/C's *new* path the same as a fresh add.
+    """
+    problems: list[str] = []
+    fields = name_status_z.split("\0")[:-1]  # trailing NUL leaves one empty field
+    i = 0
+    while i < len(fields):
+        status = fields[i]
+        code = status[0] if status else ""
+        if code in ("R", "C"):
+            path = fields[i + 2] if i + 2 < len(fields) else ""
+            i += 3
+        else:
+            path = fields[i + 1] if i + 1 < len(fields) else ""
+            i += 2
+        if code not in ("A", "R", "C") or not path:
+            continue
+        if path.startswith(_AUDIT_DOC_PREFIXES):
+            problems.append(
+                f"{path}: newly added (status {status}) under a gitignored "
+                "audit-doc prefix — these paths are never committed (CLAUDE.md "
+                "§ New audit reports and audit docs). If this really is an "
+                "intentional, one-time archival exception like af869db, get the "
+                "same explicit human call and update CLAUDE.md's exception "
+                "note, don't just add -f (or git mv) around this check."
+            )
+    return problems
+
+
+def check_no_new_audit_docs(src: Source) -> tuple[list[str], list[str]]:
+    """No newly-added file under docs/audits/ or database/audit_reports/ in the
+    staged changeset. Both directories are gitignored with no negation
+    (CLAUDE.md's exception is a one-time, already-closed archival decision, not
+    a standing carve-out).
+
+    Staged-diff mode only — this is the pre-commit enforcement point. It has no
+    reach outside a local commit (bypassed by --no-verify, or by a checkout
+    that never ran the hook at all, e.g. CI). `check_no_new_audit_docs_range()`
+    below is the base...target counterpart wired into `.github/workflows/ci.yml`
+    to cover that gap.
+    """
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    if not src.staged:
+        return problems, warnings  # only meaningful at commit time
+
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--name-status", "-z"],
+        cwd=src.root,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        return [f"git diff --cached --name-status failed: {result.stderr.strip()}"], warnings
+
+    return _added_audit_doc_problems(result.stdout), warnings
+
+
+def check_no_new_audit_docs_range(root: Path, base: str, target: str) -> list[str]:
+    """CI counterpart of check_no_new_audit_docs(): same prefix rule, but over
+    a `base...target` commit range instead of the staging area, since a CI
+    checkout has no staged changes to inspect. Wired into
+    `.github/workflows/ci.yml`'s `no-audit-docs` job."""
+    result = subprocess.run(
+        ["git", "diff", "--name-status", "-z", f"{base}...{target}"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        return [f"git diff --name-status failed: {result.stderr.strip()}"]
+    return _added_audit_doc_problems(result.stdout)
+
+
 # ── entrypoint ───────────────────────────────────────────────────────────────
 
 CHECKS = (
@@ -1513,6 +1796,8 @@ CHECKS = (
     ("command-skill-parity", check_command_skill_parity),
     ("constant-lists-match-prose", check_constant_lists_match_prose),
     ("no-audit-id-comments", check_no_audit_id_comments),
+    ("alias-reach-counts", check_alias_reach_counts),
+    ("no-new-audit-docs", check_no_new_audit_docs),
 )
 
 
@@ -1528,6 +1813,20 @@ def run_all(src: Source) -> tuple[list[str], list[str]]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if "--audit-docs-range" in argv:
+        idx = argv.index("--audit-docs-range")
+        if idx + 2 >= len(argv):
+            print("[validate-rules] --audit-docs-range requires BASE TARGET", file=sys.stderr)
+            return 2
+        base, target = argv[idx + 1], argv[idx + 2]
+        problems = check_no_new_audit_docs_range(ROOT, base, target)
+        if problems:
+            print(f"[validate-rules] {len(problems)} problem(s):")
+            for p in problems:
+                print(f"  - {p}")
+            return 1
+        print("[validate-rules] OK — no newly-added audit docs in range")
+        return 0
     staged = "--staged" in argv
     if staged:
         argv.remove("--staged")

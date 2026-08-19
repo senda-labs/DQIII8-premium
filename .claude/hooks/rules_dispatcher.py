@@ -3,14 +3,14 @@ DQIII8 — Rules Dispatcher (RAG de Reglas Dinámico)
 Inyecta SÓLO las reglas relevantes al contexto del tool en curso.
 
 En lugar de cargar el corpus de reglas entero en cada turno, este módulo mapea
-tool + input → subconjunto mínimo de reglas (~1060–8004 tokens, cl100k_base real).
+tool + input → subconjunto mínimo de reglas (~1060–8277 tokens, cl100k_base real).
 El número de archivos del registro no se cita aquí: el recuento vivo es
 `len(_REGISTRY)` y su parte de rules_db/ está fijada en CLAUDE.md
 ("Contextual rules (N)"), validada por check_claude_md_counts().
 
 RANGO CANÓNICO (medido con token_estimate(), cl100k_base real vía tiktoken):
-**suelo 1060** (solo _ALWAYS = ops + core-behavior), **techo 8004**.
-**suelo de sesión 2869** = ese suelo + CLAUDE.md + DYNAMIC.md, los dos ficheros que
+**suelo 1060** (solo _ALWAYS = ops + core-behavior), **techo 8277**.
+**suelo de sesión 2840** = ese suelo + CLAUDE.md + DYNAMIC.md, los dos ficheros que
 Claude Code auto-inyecta en toda sesión; es el impuesto de contexto real por sesión.
 
 El techo es el MÁXIMO REALMENTE ALCANZABLE, no el peor caso de la matriz
@@ -95,8 +95,8 @@ _BASH_KEYWORD_RULES: list[tuple[re.Pattern, list[str]]] = [
     # schema migration commands
     (re.compile(r"apply_migrations|schema_v2"),     ["db-mutations"]),
     (re.compile(r"\bsystemctl\b|\bservice\b"),       ["prevention"]),
-    (re.compile(r"\bclaude\b|\bcc\b"),               ["tools"]),
-    (re.compile(r"\bagent\b|\borchestrat"),          ["tiering", "agents", "plan-gate"]),
+    (re.compile(r"(?<![./])\bclaude\b"),              ["tools"]),
+    (re.compile(r"bin/agents|bin/core/dispatch|\borchestrat"), ["tiering", "agents", "plan-gate"]),
     (re.compile(r"\btmux\b|\byazi\b|bin/workspace|launch_(swarm|beeswarm|monitor)"), ["workspace"]),
     (re.compile(r"generate_company|save_response|intl.writer|intl.reports"), ["intl-reports"]),
     (re.compile(r"\bfirecrawl\b"),                   ["web-tools"]),
