@@ -73,7 +73,7 @@ if not agent or (
                     "SELECT agent_id FROM agent_registry WHERE parent_session=? "
                     "ORDER BY start_time DESC LIMIT 1",
                     (session,),
-                ).fetchone()
+                ).fetchone()  # Rango 6 CEILING: ambiguous with concurrent siblings — no per-agent disambiguator flows through this hook's stdin today
                 _rconn.close()
                 if _rrow:
                     _cand = os.path.join(DQIII8_ROOT, "tmp", f"dqiii8_agent_{_rrow[0]}.json")
