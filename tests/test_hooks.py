@@ -42,6 +42,75 @@ def test_precompact_exits_zero_and_outputs_empty_json():
     assert out == {}, f"precompact.py must output {{}}, got: {out}"
 
 
+def test_precompact_postcompact_resume_snippet_roundtrip():
+    """Rango 9 fix (2026-08-19 red-team audit): precompact.py builds a
+    resume_snippet from agent_actions, postcompact.py reinjects it as
+    'Recent activity' — the non-MCP replacement for context-mode's retired
+    continuity snapshot. Uses an isolated tmp DB (tempfile + DQIII8_ROOT
+    override + real schema_v2.sql), not the live production DB.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db_dir = tmp / "database"
+        db_dir.mkdir()
+        (tmp / "tasks").mkdir()
+        db_path = db_dir / "dqiii8.db"
+        session_id = "test-resume-snippet-01"
+
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript(SCHEMA_V2_SQL)
+        for tool_used, file_path in [
+            ("Read", ".claude/hooks/postcompact.py"),
+            ("Bash", "pytest -q tests/test_hooks.py"),
+            ("Edit", ".claude/hooks/precompact.py"),
+        ]:
+            conn.execute(
+                "INSERT INTO agent_actions (session_id, agent_name, tool_used, file_path) "
+                "VALUES (?, 'test-agent', ?, ?)",
+                (session_id, tool_used, file_path),
+            )
+        conn.commit()
+        conn.close()
+
+        env = {**os.environ, "DQIII8_ROOT": str(tmp)}
+
+        pre_payload = json.dumps({"session_id": session_id})
+        pre_result = subprocess.run(
+            [sys.executable, str(HOOKS / "precompact.py")],
+            input=pre_payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert pre_result.returncode == 0
+
+        post_payload = json.dumps({"session_id": session_id})
+        post_result = subprocess.run(
+            [sys.executable, str(HOOKS / "postcompact.py")],
+            input=post_payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+        assert post_result.returncode == 0
+        out = json.loads(post_result.stdout)
+        ctx = out.get("additionalContext", "")
+        assert "Recent activity:" in ctx
+        assert "Edit: .claude/hooks/precompact.py" in ctx
+        assert "Bash: pytest -q tests/test_hooks.py" in ctx
+        assert "Read: .claude/hooks/postcompact.py" in ctx
+        # Chronological order (oldest first, matching insertion order above).
+        read_pos = ctx.index("Read: .claude/hooks/postcompact.py")
+        bash_pos = ctx.index("Bash: pytest -q tests/test_hooks.py")
+        edit_pos = ctx.index("Edit: .claude/hooks/precompact.py")
+        assert read_pos < bash_pos < edit_pos
+
+        state_file = tmp / "tasks" / f"precompact_state_{session_id}.json"
+        assert not state_file.exists(), "postcompact.py must delete the state file after reading it"
+
+
 def test_cost_tier_classification():
     """_model_tier() in pre_tool_use classifies local/cloud-free/paid tiers correctly."""
     src = (HOOKS / "pre_tool_use.py").read_text(encoding="utf-8")

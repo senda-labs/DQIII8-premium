@@ -5,9 +5,11 @@ Re-injects the minimum operational baseline after context compaction.
 
 Fires AFTER context-mode finishes compaction.
 Restores: active model, active project, next step, audit score (only if
-pending) — see "Injection rules" comment below. Reads the session-scoped
-tasks/precompact_state_{session_id}.json written by precompact.py to
-recover previous state, then deletes it. Always exits 0 — never abort.
+pending), recent-activity resume snippet (only if any agent_actions rows
+exist for this session) — see "Injection rules" comment below. Reads the
+session-scoped tasks/precompact_state_{session_id}.json written by
+precompact.py to recover previous state, then deletes it. Always exits
+0 — never abort.
 """
 
 import json
@@ -126,6 +128,10 @@ except Exception as e:
 # ── Session stats before compact ─────────────────────────────────────
 actions_before = pre_state.get("actions_count", "?")
 
+# ── Recent-activity resume snippet (Rango 9 fix) ───────────────────────
+resume_snippet = pre_state.get("resume_snippet", "")
+resume_block = f"\nRecent activity:\n{resume_snippet}" if resume_snippet else ""
+
 # ── Compact hint heuristic ────────────────────────────────────────────
 compact_hint = ""
 try:
@@ -143,18 +149,17 @@ except (ValueError, TypeError):
 # model, project, next_step : ALWAYS (minimum operational baseline)
 # audit_info                : ONLY IF tasks/audit_pending.flag exists
 # compact_hint               : ONLY IF actions_before > 50 (already conditional)
-# Conversation-content continuity (the "enterprise-grade summary of key
-# points before compacting") is NOT built here — it is already handled by
-# context-mode's own precompact.mjs/sessionstart.mjs (resume-snapshot
-# mechanism), which fires independently. Duplicating it here would be
-# redundant, not "by necessity".
+# resume_block               : ONLY IF precompact.py found agent_actions rows
+#                               for this session (Rango 9 replacement for the
+#                               retired context-mode continuity snapshot —
+#                               see precompact.py's resume_snippet comment)
 ctx = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DQIII8 — PostCompact {datetime.now().strftime('%H:%M')}
 Context compacted — state restored
 Model  : {model}
 Project: {project}
 Next   : {next_step}{audit_info}
-Session actions: {actions_before}{compact_hint}
+Session actions: {actions_before}{compact_hint}{resume_block}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
 _log.info(
