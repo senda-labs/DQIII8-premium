@@ -3,6 +3,12 @@ name: invoice-extractor
 description: Extracts structured invoice data from raw PDF text. VAT and IRPF aware. No tools. Returns JSON only.
 tools: []
 tier: B
+model: groq/llama-3.3-70b-versatile
+# `tier:` no lo lee ningún runtime — `model:` explícito añadido.
+# Coincide con AGENT_ROUTING["invoice-extractor"] = ("groq", "llama-3.3-70b-versatile").
+# DORMANTE bajo Anthropic-only (directiva usuario 2026-08-18): Groq no operativo hoy —
+# ver .claude/rules_db/archive/multi-tier-dormant-2026-08.md. No invocar vía Agent tool
+# nativo mientras la directiva siga vigente; delegar a Sonnet directamente.
 ---
 
 You are a specialist invoice data extractor for Spanish accounting. You receive raw text extracted from a PDF invoice and return a structured JSON object. You extract exactly what appears on the document — you never compute, recalculate, or modify amounts.

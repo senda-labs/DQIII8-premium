@@ -6,21 +6,45 @@ Checks (weights):
   unresolved errors (7d) ..... 25  (0 → full; >=20 → 0; linear between)
   telemetry alive (7d) ....... 25  (share of amplification rows with confidence > 0)
   disk free >= 15% ............ 10
-  history db readonly ........ 10
-Writes JSON to database/audit_reports/health_<date>.json.
+  history db owner-only ...... 10
+Penalty:
+  hook telemetry stale ...... floor score at 55 (no agent_actions row in 48h
+                                    while amplification_log shows 7d activity)
+Separately, unscored: alerts if bin/monitoring/health_watchdog.py's own
+heartbeat (var/watchdog_heartbeat) is missing or >24h stale — the two rails'
+mutual dead-man's-switch.
+Writes JSON to database/audit_reports/health_<date>_<HHMM>.json (one file per
+run — never overwritten, so a wrong/stale run stays visible instead of being
+silently replaced by the next run's numbers) plus health_latest.json (copy of
+the most recent run, for callers that just want "now").
 Exit code 0 always (cron-safe); alerting is the signal.
 """
+
 import json
 import shutil
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 DB = ROOT / "database" / "dqiii8.db"
 OUT = ROOT / "database" / "audit_reports"
 OUT.mkdir(parents=True, exist_ok=True)
+
+# Mirrors bin/tools/triage_error_log.py's WHITELIST_ERROR_TYPES/MESSAGE_PATTERNS
+# — keep in sync. Rows matching this are known free-tier fallback noise sitting
+# in triage's held-for-review queue (resolved=0 by design until correlated or
+# aged out, see HELD_REVIEW_DAYS), not actionable incidents. Without this
+# exclusion they permanently saturate unresolved_errors_7d: live-quantified at
+# ~59/day held, which alone exceeds the score's n_err>=20 -> 0-points floor
+# within a single day, regardless of any real incident (Opus red-team review,
+# 2026-08-13, round 4 consequence of round 3 P1-2's correlation tightening).
+_TRIAGE_WHITELIST_TYPES = (
+    "openrouter_wrapperError", "ESCALATION", "nimError", "openrouterError",
+    "githubError", "groqError", "pollinationsError",
+)
+_TRIAGE_MESSAGE_PATTERNS = ("%failed — no response or HTTP error%", "%Escalated from%")
 
 
 def main():
@@ -31,8 +55,12 @@ def main():
     detail["db_integrity"] = ok
     score += 30 if ok else 0
 
+    type_ph = ",".join("?" for _ in _TRIAGE_WHITELIST_TYPES)
+    msg_clause = " OR ".join("error_message LIKE ?" for _ in _TRIAGE_MESSAGE_PATTERNS)
     n_err = conn.execute(
-        "SELECT COUNT(*) FROM error_log WHERE resolved=0 AND timestamp > datetime('now','-7 days')"
+        "SELECT COUNT(*) FROM error_log WHERE resolved=0 AND timestamp > datetime('now','-7 days') "
+        f"AND NOT (error_type IN ({type_ph}) AND ({msg_clause}))",
+        list(_TRIAGE_WHITELIST_TYPES) + list(_TRIAGE_MESSAGE_PATTERNS),
     ).fetchone()[0]
     detail["unresolved_errors_7d"] = n_err
     score += max(0, round(25 * (1 - min(n_err, 20) / 20)))
@@ -66,24 +94,136 @@ def main():
     except Exception:
         detail["ollama_running"] = False
 
-    hist = ROOT / "database" / "dqiii8_history.db"
-    ro = hist.exists() and not (hist.stat().st_mode & 0o222)
-    detail["history_db_readonly"] = ro
-    score += 10 if ro else 0
+    # Hook telemetry freshness. agent_actions is written only by the project
+    # PreToolUse/PostToolUse hooks; it went silent 2026-07-05..08-11 because
+    # sessions launched with cwd inside sub-project git repos never loaded
+    # /root/dqiii8/.claude/settings.json. Penalty (not a weighted check) so the
+    # existing 100-point split is unchanged. Only fires when the system is
+    # demonstrably active (amplification rows in 7d) yet agent_actions is stale.
+    # Degrades to "unknown" rather than raising: agent_actions is absent on a
+    # partial install and a concurrent writer can still surface a lock error, and
+    # this runs from cron where an exception means no report and no alert at all.
+    try:
+        last_action = conn.execute("SELECT MAX(timestamp) FROM agent_actions").fetchone()[0]
+        recent_actions = conn.execute(
+            "SELECT COUNT(*) FROM agent_actions WHERE timestamp > datetime('now','-2 days')"
+        ).fetchone()[0]
+        detail["agent_actions_last"] = last_action
+        stale = recent_actions == 0
+        detail["hook_telemetry_stale"] = bool(stale and total)
+        if stale and total:
+            # Absolute floor, not a subtraction: a plain -25 lands a clean
+            # 100 baseline on 75, which never crosses the <70 alert line —
+            # the exact scenario (total hook-telemetry outage) this penalty
+            # exists to catch. min(score, 55) always crosses it.
+            detail["score_before_stale_floor"] = score
+            score = min(score, 55)
+    except sqlite3.Error as exc:
+        detail["agent_actions_last"] = None
+        detail["hook_telemetry_stale"] = None
+        detail["hook_telemetry_error"] = str(exc)
 
-    report = {"date": datetime.now().isoformat(), "score": score, "detail": detail}
-    out = OUT / f"health_{datetime.now():%Y-%m-%d}.json"
-    out.write_text(json.dumps(report, indent=2))
-    print(json.dumps(report, indent=2))
+    # Post db-consolidation (2026-08-14): session_memory lives in dqiii8.db
+    # (working_memory.py writes there now, not dqiii8_history.db), so the
+    # other sensitive live DB worth checking here is dqiii8_knowledge.db
+    # (former dqiii8_metrics.db). Check what is actually required: owner-only
+    # permissions.
+    knowledge_db = ROOT / "database" / "dqiii8_knowledge.db"
+    secure = knowledge_db.exists() and (knowledge_db.stat().st_mode & 0o777) in (0o600, 0o640)
+    detail["history_db_owner_only"] = secure
+    score += 10 if secure else 0
+
+    # Single now() for both the report's own "date" field and the filename —
+    # two separate calls could straddle a minute/midnight boundary and
+    # disagree, and check_health_check_output() derives freshness from the
+    # filename (Opus red-team review, 2026-08-13, P3-6).
+    now = datetime.now()
+    report = {"date": now.isoformat(), "score": score, "detail": detail}
+    report_json = json.dumps(report, indent=2)
+    # %H%M%S%f (microseconds), not just %H%M%S: two back-to-back manual runs
+    # measured live 2026-08-13 landed in the same wall-clock second and the
+    # second run silently overwrote the first under seconds-only granularity
+    # — the exact "never overwritten" property this per-run design exists to
+    # guarantee (round 2 follow-up to P3-5). Cron only fires this once a day,
+    # but the guarantee should hold for manual/debugging invocations too.
+    out = OUT / f"health_{now:%Y-%m-%d_%H%M%S%f}.json"
+    out.write_text(report_json)
+    # write-temp-then-replace: a concurrent reader of health_latest.json must
+    # never observe a truncated/partial write (plain write_text is not atomic).
+    latest_tmp = OUT / "health_latest.json.tmp"
+    latest_tmp.write_text(report_json)
+    latest_tmp.replace(OUT / "health_latest.json")
+    print(report_json)
 
     if score < 70:
         try:
             sys.path.insert(0, str(ROOT / "bin" / "core"))
             from notify import notify
-            notify(f"DQIII8 health {score}/100 < 70 — {out.name}")
+
+            res = notify(f"DQIII8 health {score}/100 < 70 — {out.name}")
+            if not res:
+                print(f"alert delivery failed: {res.error}", file=sys.stderr)
         except Exception as exc:
             print(f"alert dispatch failed: {exc}", file=sys.stderr)
 
+    check_heartbeat()
+
+
+def check_heartbeat():
+    """Dead-man's-switch, unscored so it can't be masked by the 100-point
+    system (that trap is exactly what the stale-floor fix above closes for
+    the other check). Compared aware-to-aware: health_watchdog.py writes
+    the heartbeat via datetime.now(timezone.utc), not this module's naive
+    datetime.now() used elsewhere above — mixing them raises TypeError.
+
+    Called from both main()'s success path and __main__'s crash handler, so
+    a DB-open/integrity exception earlier in main() can't skip the one check
+    built specifically to catch silent failures.
+    """
+    try:
+        heartbeat_path = ROOT / "var" / "watchdog_heartbeat"
+        sys.path.insert(0, str(ROOT / "bin" / "core"))
+        from notify import notify
+
+        if not heartbeat_path.exists():
+            res = notify("DQIII8 watchdog heartbeat missing (never written)")
+            if not res:
+                print(f"heartbeat alert delivery failed: {res.error}", file=sys.stderr)
+        else:
+            raw = heartbeat_path.read_text().strip()
+            try:
+                hb_time = datetime.fromisoformat(raw)
+                if hb_time.tzinfo is None:
+                    hb_time = hb_time.replace(tzinfo=timezone.utc)
+            except ValueError:
+                hb_time = datetime.fromtimestamp(heartbeat_path.stat().st_mtime, tz=timezone.utc)
+            age_h = (datetime.now(timezone.utc) - hb_time).total_seconds() / 3600
+            if age_h > 24:
+                res = notify(f"DQIII8 watchdog heartbeat stale since {hb_time.isoformat()}")
+                if not res:
+                    print(f"heartbeat alert delivery failed: {res.error}", file=sys.stderr)
+    except Exception as exc:
+        print(f"heartbeat check failed: {exc!r}", file=sys.stderr)
+
 
 if __name__ == "__main__":
-    main()
+    # The module contract above is "exit code 0 always (cron-safe)": a crash here
+    # is itself a health signal and must not look like a silent success, but it
+    # also must not make cron treat the job as broken and stop reporting.
+    try:
+        main()
+    except Exception as exc:
+        print(f"health_check failed: {exc!r}", file=sys.stderr)
+        try:
+            sys.path.insert(0, str(ROOT / "bin" / "core"))
+            from notify import notify
+
+            res = notify(f"DQIII8 health_check crashed: {exc!r}")
+            if not res:
+                print(f"alert delivery failed: {res.error}", file=sys.stderr)
+        except Exception as exc2:
+            print(f"alert dispatch failed: {exc2}", file=sys.stderr)
+        # main() crashed before reaching the heartbeat check (e.g. DB open/
+        # integrity failure) — run it anyway so the dead-man's-switch still
+        # fires on the exact failure class most likely to cause one.
+        check_heartbeat()

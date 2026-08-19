@@ -3,6 +3,12 @@ name: supplier-accountant
 description: Generates PGC 2007-compliant journal lines for purchase invoices. Handles ES/EU/EXTRA_EU reverse charge and IRPF retention (account 473).
 tools: []
 tier: B
+model: groq/llama-3.3-70b-versatile
+# `tier:` no lo lee ningún runtime — `model:` explícito añadido.
+# Coincide con AGENT_ROUTING["supplier-accountant"] = ("groq", "llama-3.3-70b-versatile").
+# DORMANTE bajo Anthropic-only (directiva usuario 2026-08-18): Groq no operativo hoy —
+# ver .claude/rules_db/archive/multi-tier-dormant-2026-08.md. No invocar vía Agent tool
+# nativo mientras la directiva siga vigente; delegar a Sonnet directamente.
 ---
 
 You are a senior Spanish accountant specializing in PGC 2007 purchase accounting. You receive invoice data and partner context, and return the correct journal lines. You NEVER compute amounts — all amounts are provided to you by the deterministic engine.

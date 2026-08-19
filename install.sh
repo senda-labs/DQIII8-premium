@@ -36,9 +36,14 @@ if ! command -v python3 &>/dev/null; then
 fi
 PY_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 ok "Python $PY_VERSION"
-pip install -q --break-system-packages -r "$DQIII8_ROOT/requirements.txt" 2>/dev/null \
-    || pip install -q -r "$DQIII8_ROOT/requirements.txt" && ok "Python deps installed"
-pip install -q --break-system-packages sqlite-vec 2>/dev/null || pip install -q sqlite-vec 2>/dev/null && ok "sqlite-vec installed"
+if [[ -f "$DQIII8_ROOT/requirements.lock" ]]; then
+    pip install -q --require-hashes --break-system-packages -r "$DQIII8_ROOT/requirements.lock" 2>/dev/null \
+        || pip install -q --require-hashes -r "$DQIII8_ROOT/requirements.lock" && ok "Python deps installed (hash-verified)"
+else
+    warn "requirements.lock not found — falling back to unpinned requirements.txt"
+    pip install -q --break-system-packages -r "$DQIII8_ROOT/requirements.txt" 2>/dev/null \
+        || pip install -q -r "$DQIII8_ROOT/requirements.txt" && ok "Python deps installed"
+fi
 _INSTALLED+=("Python deps")
 
 # ── 2. Ollama ─────────────────────────────────────────────────────────
@@ -135,12 +140,6 @@ if sqlite3 "$DQIII8_ROOT/database/dqiii8.db" < "$DQIII8_ROOT/database/schema_v2.
     ok "dqiii8.db: schema_v2.sql applied (46 tables)"
 else
     warn "schema_v2.sql had errors — check database/ directory"
-fi
-# dqiii8_metrics.db — working memory + session events (required by smoke tests)
-if sqlite3 "$DQIII8_ROOT/database/dqiii8_metrics.db" < "$DQIII8_ROOT/database/schema_v2.sql" 2>/dev/null; then
-    ok "dqiii8_metrics.db: schema applied"
-else
-    warn "dqiii8_metrics.db schema failed — smoke tests may be affected"
 fi
 _INSTALLED+=("Database schema (schema_v2.sql)")
 

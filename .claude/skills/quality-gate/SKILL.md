@@ -43,10 +43,13 @@ isort [path]
 ### Phase 3 — Lint (ruff)
 
 ```bash
-ruff check [path] --select E,F,W 2>&1 | head -30
+ruff check [path] --select E,F,W,PLE2510,PLE2512,PLE2513,PLE2514,PLE2515 2>&1 | head -30
 ```
 
-Fail on E and F codes. W codes: report only.
+Fail on E, F, and PLE25xx codes (hidden/invalid Unicode control characters — zero false
+positives against this repo, unlike RUF001-003 which flag legitimate stylistic uses of
+the multiplication sign and info-symbol-with-VS16 and were deliberately excluded). W
+codes: report only.
 
 ### Phase 4 — Tests (pytest)
 
@@ -88,6 +91,4 @@ RESULT: PASS / BLOCKED
 
 ## Related
 
-- `verification-loop` skill — more detailed phase-by-phase protocol
-- `tdd-workflow` skill — write tests before running this
-- `security-review` skill — deeper checklist for auth/secrets code
+- `security-review` skill (Claude Code built-in) — deeper checklist for auth/secrets code

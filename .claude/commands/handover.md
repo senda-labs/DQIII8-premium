@@ -1,31 +1,14 @@
 # /handover — Session Handover Note
 
-## Trigger
-User writes `/handover` at the end of a work session.
-
-## Behavior
-
-Executes the handover script with a single call:
-
-```bash
-python3 bin/tools/handover.py
-```
-
-The script does everything without additional Claude tools:
-- Collects modified files via `git diff --stat HEAD`
-- Reads `projects/[project].md` for the next step
-- Reads `tasks/lessons.md` (today's entries)
-- Writes `sessions/YYYY-MM-DD_session.md`
-- Updates `projects/[project].md` (section "Last session")
-- `git add sessions/ projects/` → commit → push origin master
-
-## Non-interactive invocation
-
-```bash
-python3 bin/tools/handover.py
-```
-
-## Notes
-- If git push fails (network/auth), the .md file is saved locally — does not block
-- Never include sensitive information (API keys, passwords) in the handover
-- Variable `DQIII8_PROJECT` controls the active project (default: `dqiii8-core`)
+> **SSOT: `.claude/skills/handover/SKILL.md`.** This command file is a pointer
+> only — read the skill for the full procedure. It previously carried a second,
+> divergent copy of the procedure; the skill's stop-and-ask flow
+> (`AskUserQuestion` before writing anything, `bin/tools/handover.py`, local
+> save, no commit, no push) is the correct behaviour for **this manual path**.
+> That deleted copy was *not* pure fiction, as the 2026-08-18 fix wrongly
+> assumed: `.claude/hooks/stop.py` §3 contains a second, automatic handover
+> implementation that does `git add sessions/` → commit → `git push origin
+> master`, and §2b pushes to `master` on every session close regardless. Both
+> are described in `.claude/skills/handover/SKILL.md` §Two implementations and
+> `.claude/rules/02_hooks_and_permissions.md`. "Never committed or pushed" is
+> true of `/handover`, false of the hook. Re-resolved 2026-08-18 (F1).

@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-10  
 **Tester:** Sonnet orchestrator  
-**Environment:** Netcup RS 2000 G11 (Debian 13, Python 3.13.5)
+**Environment:** VPS server (Debian 13, Python 3.13.5)
 
 ---
 

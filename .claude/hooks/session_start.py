@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 JARVIS = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
+sys.path.insert(0, str(JARVIS / "bin"))
 
 _log = logging.getLogger("dqiii8.session_start")
 if not _log.handlers:
@@ -35,19 +36,29 @@ DB = JARVIS / "database" / "dqiii8.db"
 LESSONS = JARVIS / "tasks" / "lessons.md"
 FLAG = JARVIS / "tasks" / "audit_pending.flag"
 
-# ── Active project ─────────────────────────────────────────────────
-project = os.environ.get("DQIII8_PROJECT", "")
-if not project:
-    cwd = Path(data.get("cwd", "."))
-    # Detect project from CWD path parts — check known projects dir
-    _projects_dir = JARVIS / "projects"
-    _known = {p.stem for p in _projects_dir.glob("*.md")} if _projects_dir.exists() else set()
-    for part in cwd.parts:
-        if part in _known or part in ("content",):
-            project = part
-            break
-    if not project:
-        project = "dqiii8-core"
+# ── Active project (Correction C fix: the old resolver globbed the
+# nonexistent JARVIS/projects/ dir and always fell through to dqiii8-core) ──
+_cwd_str = str(Path(data.get("cwd", ".")))
+try:
+    from core.project_context import resolve_project
+
+    _session_id = data.get("session_id", "")
+    project = resolve_project(session_id=_session_id, cwd=_cwd_str)
+except Exception as e:
+    _log.warning("resolve_project failed, defaulting to dqiii8-core: %s", e, exc_info=True)
+    project = "dqiii8-core"
+
+
+# Seed project_context(scope=session_id) when cwd is under my-projects/, so
+# later resolve_project() calls with only a session_id (no cwd) still resolve.
+_session_id_for_seed = data.get("session_id", "")
+if _session_id_for_seed and "/my-projects/" in _cwd_str:
+    try:
+        from core.project_context import set_project
+
+        set_project(project, scope=_session_id_for_seed, declared_by="session_start", validate=False)
+    except Exception as e:
+        _log.debug("project_context session seed skipped: %s", e)
 
 # Save session start time so stop.py Fallback 2 can scope to this session
 try:
@@ -94,7 +105,7 @@ except Exception as e:
 # ── Pending audit alert ────────────────────────────────────────────
 audit_alert = ""
 if FLAG.exists():
-    audit_alert = "\n⚠️  AUDIT PENDING — run /audit now."
+    audit_alert = "\n⚠  AUDIT PENDING — run /audit now."
     try:
         FLAG.unlink()
     except Exception as e:
@@ -191,19 +202,37 @@ except Exception as e:
 model = os.environ.get("DQIII8_MODEL", "qwen2.5-coder:7b (Ollama)")
 
 # ── Personality Mode ────────────────────────────────────────────────
-_mode = ""
-try:
-    _mode_file = Path("/tmp/dqiii8_mode.txt")
-    if _mode_file.exists():
-        _mode = _mode_file.read_text(encoding="utf-8").strip()
-except Exception as e:
-    _log.debug("mode-file read skipped: %s", e)
-
 _MODE_BEHAVIORS = {
     "coder": "CODER MODE: code first, minimal prose, Black always, show diffs.",
     "analyst": "ANALYST MODE: tables, metrics, verify numbers, no speculation.",
     "creative": "CREATIVE MODE: narrative, literary style, no technical formatting.",
 }
+
+# Precedence: DQIII8_MODE env var → var/dqiii8_mode.conf → /tmp legacy file.
+#
+# The env var is only honoured when it names a real personality mode. The same
+# DQIII8_MODE name is already owned by permission_analyzer.py, where it carries a
+# different vocabulary ("supervised"/"autonomous"); validating against
+# _MODE_BEHAVIORS keeps the two uses from colliding instead of silently
+# interpreting a permission setting as a writing style.
+#
+# var/dqiii8_mode.conf is the file /mode writes (gitignored, survives reboot).
+# /tmp/dqiii8_mode.txt is the pre-2026-08-17 location, still read so an already
+# running box doesn't lose its mode mid-flight.
+_mode = ""
+try:
+    _env_mode = os.environ.get("DQIII8_MODE", "").strip().lower()
+    if _env_mode in _MODE_BEHAVIORS:
+        _mode = _env_mode
+    else:
+        for _mode_file in (JARVIS / "var" / "dqiii8_mode.conf", Path("/tmp/dqiii8_mode.txt")):
+            if _mode_file.exists():
+                _candidate = _mode_file.read_text(encoding="utf-8").strip().lower()
+                if _candidate:
+                    _mode = _candidate
+                    break
+except Exception as e:
+    _log.debug("mode read skipped: %s", e)
 
 _vault_block = ""
 if vault_facts:

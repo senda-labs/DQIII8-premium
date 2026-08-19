@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS agent_actions (
     worktree        TEXT,
     skills_active   TEXT,               -- JSON array
     blocked_by_hook INTEGER DEFAULT 0
-, cost_eur REAL DEFAULT 0.0, model_tier INTEGER DEFAULT 0, tokens_input INTEGER DEFAULT 0, tokens_output INTEGER DEFAULT 0, estimated_cost_usd REAL DEFAULT 0.0, tier TEXT DEFAULT 'unknown', domain_enriched BOOLEAN DEFAULT 0, domain TEXT, knowledge_chunks_used INTEGER DEFAULT 0, energy_wh REAL DEFAULT 0, cpu_percent REAL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER, notes TEXT);
+, cost_eur REAL DEFAULT 0.0, model_tier INTEGER DEFAULT 0, tokens_input INTEGER DEFAULT 0, tokens_output INTEGER DEFAULT 0, estimated_cost_usd REAL DEFAULT 0.0, tier TEXT DEFAULT 'unknown', domain_enriched BOOLEAN DEFAULT 0, domain TEXT, knowledge_chunks_used INTEGER DEFAULT 0, energy_wh REAL DEFAULT 0, cpu_percent REAL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER, notes TEXT, request_id TEXT);
+CREATE INDEX IF NOT EXISTS idx_agent_actions_request_id ON agent_actions(request_id);
 CREATE TABLE IF NOT EXISTS error_log (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp       TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -88,6 +89,7 @@ CREATE TABLE IF NOT EXISTS audit_reports (
 CREATE INDEX IF NOT EXISTS idx_actions_agent   ON agent_actions(agent_name, timestamp);
 CREATE INDEX IF NOT EXISTS idx_actions_session ON agent_actions(session_id);
 CREATE INDEX IF NOT EXISTS idx_actions_success ON agent_actions(success, timestamp);
+CREATE INDEX IF NOT EXISTS idx_actions_project ON agent_actions(project, timestamp);
 CREATE INDEX IF NOT EXISTS idx_errors_session  ON error_log(session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_proj   ON sessions(project, start_time);
 CREATE VIEW IF NOT EXISTS agent_performance AS
@@ -595,20 +597,6 @@ CREATE TABLE IF NOT EXISTS morning_report (
     report_text TEXT,
     sent_to_telegram INTEGER DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS gemini_audits (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at       TEXT DEFAULT (datetime('now')),
-    module           TEXT NOT NULL,
-    metric           TEXT NOT NULL,
-    report_path      TEXT,
-    question         TEXT,
-    gemini_response  TEXT,
-    issues_found     INTEGER DEFAULT 0,
-    issues_resolved  INTEGER DEFAULT 0,
-    impact_score     REAL,
-    applied_to_code  INTEGER DEFAULT 0,
-    notes            TEXT
-);
 CREATE TABLE IF NOT EXISTS github_research (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at        TEXT DEFAULT (datetime('now')),
@@ -878,22 +866,18 @@ GROUP BY b_on.model, b_on.task_domain
 /* knowledge_benchmark_dq_uplift(model,task_domain,score_uplift,tokens_saved,messages_saved,hallucinations_reduced) */
 /* knowledge_benchmark_dq_uplift(model,task_domain,score_uplift,tokens_saved,messages_saved,hallucinations_reduced) */;
 CREATE VIEW IF NOT EXISTS v_cost_savings AS
-SELECT 
+SELECT
     date(timestamp) as day,
-    CASE model_tier
-        WHEN 1 THEN 'C (local $0)'
-        WHEN 2 THEN 'B (cloud free)'
-        WHEN 3 THEN 'A (paid)'
-        ELSE 'unknown'
-    END as tier,
+    COALESCE(tier, 'unknown') as tier,
     COUNT(*) as actions,
     ROUND(AVG(duration_ms)/1000.0, 1) as avg_s,
-    -- Actual cost: only Tier A (Sonnet) has cost; proxy 666 tok/call avg
-    ROUND(SUM(CASE WHEN model_tier = 3 THEN (666 * 0.000015) ELSE 0 END), 4) as actual_cost_usd,
-    -- Sonnet-equivalent: every action at Sonnet pricing (666 tok avg)
+    -- Stage 4: real cost from estimated_cost_usd (was a flat 666-token Sonnet
+    -- proxy keyed off model_tier, which is only ever 0 or 3 in practice).
+    ROUND(SUM(COALESCE(estimated_cost_usd, 0)), 4) as actual_cost_usd,
     ROUND(COUNT(*) * 666 * 0.000015, 4) as sonnet_equivalent_usd
 FROM agent_actions
 WHERE timestamp >= date('now', '-30 days')
+  AND (error_message IS NULL OR error_message NOT LIKE 'reconciled:%')
 GROUP BY day, tier
 /* v_cost_savings(day,tier,actions,avg_s,actual_cost_usd,sonnet_equivalent_usd) */;
 CREATE VIEW IF NOT EXISTS v_agent_performance AS
@@ -911,17 +895,344 @@ ORDER BY total_actions DESC
 CREATE VIEW IF NOT EXISTS v_tier_distribution AS
 SELECT
     date(timestamp) as day,
-    CASE 
-        WHEN agent_name IN ('python-specialist','git-specialist','web-specialist',
-            'algo-specialist','content-automator') THEN 'C'
-        WHEN agent_name IN ('finance-specialist','auditor','orchestrator') THEN 'A'
-        ELSE 'B'
-    END as tier,
+    -- Stage 4: real tier TEXT column (was a hardcoded 5-agent allowlist that
+    -- silently missed claude-sonnet-4-6 and invoice-extractor, the top 2
+    -- agents by volume, both falling into the ELSE 'B' bucket).
+    COALESCE(tier, 'unknown') as tier,
     COUNT(*) as actions,
     ROUND(AVG(duration_ms)) as avg_ms
 FROM agent_actions
+WHERE (error_message IS NULL OR error_message NOT LIKE 'reconciled:%')
 GROUP BY day, tier
 /* v_tier_distribution(day,tier,actions,avg_ms) */;
+CREATE VIEW IF NOT EXISTS v_action_project AS
+SELECT
+    a.id,
+    a.timestamp,
+    a.session_id,
+    a.agent_name,
+    COALESCE(
+        a.project,
+        s.project,
+        (SELECT pc.project FROM project_context pc
+         WHERE pc.scope = 'global'
+           AND pc.declared_at <= a.timestamp
+           AND (pc.ended_at IS NULL OR pc.ended_at > a.timestamp)
+         ORDER BY pc.declared_at DESC LIMIT 1),
+        'unattributed'
+    ) AS resolved_project
+FROM agent_actions a
+LEFT JOIN sessions s ON s.session_id = a.session_id
+/* v_action_project(id,timestamp,session_id,agent_name,resolved_project) */;
+CREATE VIEW IF NOT EXISTS v_action_category AS
+SELECT
+    a.id,
+    a.timestamp,
+    a.session_id,
+    a.agent_name,
+    a.tool_used,
+    a.action_type,
+    CASE
+        WHEN a.action_type = 'api_call' THEN 'llm_call'
+        WHEN LOWER(COALESCE(a.file_path, '')) LIKE '%test_%.py%'
+          OR LOWER(COALESCE(a.file_path, '')) LIKE '%/tests/%'
+          OR LOWER(COALESCE(a.file_path, '')) LIKE '%pytest%'
+            THEN 'test'
+        WHEN a.tool_used IN ('Edit', 'Write', 'MultiEdit')
+          AND (LOWER(COALESCE(a.file_path, '')) LIKE '%.md'
+            OR LOWER(COALESCE(a.file_path, '')) LIKE '%.rst'
+            OR LOWER(COALESCE(a.file_path, '')) LIKE '%.txt'
+            OR LOWER(COALESCE(a.file_path, '')) LIKE '%/docs/%')
+            THEN 'docs'
+        WHEN a.tool_used IN ('Edit', 'Write', 'MultiEdit') THEN 'code'
+        WHEN a.tool_used = 'Bash'
+          AND (LOWER(COALESCE(a.file_path, '')) LIKE '%systemctl%'
+            OR LOWER(COALESCE(a.file_path, '')) LIKE '%crontab%'
+            OR LOWER(COALESCE(a.file_path, '')) LIKE '%docker%'
+            OR LOWER(COALESCE(a.file_path, '')) LIKE '%nginx%'
+            OR LOWER(COALESCE(a.file_path, '')) LIKE '%pip install%')
+            THEN 'infra'
+        WHEN a.tool_used IN ('Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch')
+          OR a.tool_used LIKE 'mcp\_\_%' ESCAPE '\'
+            THEN 'research'
+        ELSE 'other'
+    END AS work_kind,
+    CASE
+        WHEN a.tool_used = 'Bash' AND LOWER(COALESCE(a.file_path, '')) LIKE '%git commit%' THEN
+            CASE
+                WHEN LOWER(a.file_path) LIKE '%fix:%' OR LOWER(a.file_path) LIKE '%fix(%' THEN 'fix'
+                WHEN LOWER(a.file_path) LIKE '%feat:%' OR LOWER(a.file_path) LIKE '%feat(%' THEN 'feature'
+                WHEN LOWER(a.file_path) LIKE '%refactor:%' OR LOWER(a.file_path) LIKE '%refactor(%' THEN 'refactor'
+                WHEN LOWER(a.file_path) LIKE '%perf:%' OR LOWER(a.file_path) LIKE '%perf(%' THEN 'perf'
+                WHEN LOWER(a.file_path) LIKE '%chore:%' OR LOWER(a.file_path) LIKE '%chore(%' THEN 'chore'
+                WHEN LOWER(a.file_path) LIKE '%docs:%' OR LOWER(a.file_path) LIKE '%docs(%' THEN 'docs'
+                ELSE NULL
+            END
+        ELSE NULL
+    END AS intent
+FROM agent_actions a
+/* v_action_category(id,timestamp,session_id,agent_name,tool_used,action_type,work_kind,intent) */;
+-- Fixed post-Stage-7 (Opus adversarial review P1-1/P1-2, see
+-- database/migrations/2026-08-13_fix_project_cost_weekly.up.sql): added
+-- cost_usd_listprice_equivalent from Stage 5's token_usage transcript rows
+-- (previously disconnected — cost_usd alone is real spend, ~$0 lifetime on
+-- free NIM tiers, and never included the flat-rate Claude Code proxy).
+-- iso_week is deliberately still strftime('%Y-%W'), not true ISO (%G-%V):
+-- this VPS's SQLite 3.45.1 predates %G/%V (added 3.46.0) and returns '' for
+-- them (confirmed live) — worse than the mis-bucketing (Opus P3-8).
+-- human_agg joins on human_hours.project = agent_agg.project as free text
+-- (no FK/validation on that column) — a typo'd human-hours entry silently
+-- fails to join rather than erroring (Opus P3-12). Not fixed here: would
+-- need normalizing human_hours.project at insert time, out of scope for a
+-- view-only fix.
+-- transcript_agg's project namespace fixed (Opus P3 minor, addressed
+-- 2026-08-13, see database/migrations/2026-08-13_fix_project_cost_weekly_namespace.up.sql):
+-- previously kept raw sessions.project only, while agent_agg's project came
+-- from v_action_project's 4-step fallback chain — a session with
+-- sessions.project IS NULL but attributable via the open project_context
+-- global row resolved to different literal strings on each side of the
+-- LEFT JOIN, silently dropping real transcript cost to 0. transcript_agg
+-- now applies the same project_context global-row fallback.
+CREATE VIEW IF NOT EXISTS v_project_cost_weekly AS
+WITH agent_agg AS (
+    SELECT
+        vap.resolved_project AS project,
+        strftime('%Y-%W', a.timestamp) AS iso_week,
+        COUNT(*) AS actions,
+        COUNT(DISTINCT a.agent_name) AS distinct_agents,
+        COUNT(DISTINCT a.session_id) AS distinct_sessions,
+        ROUND(SUM(COALESCE(a.duration_ms, 0)) / 3600000.0, 2) AS agent_hours,
+        ROUND(SUM(COALESCE(a.estimated_cost_usd, 0)), 4) AS cost_usd
+    FROM agent_actions a
+    JOIN v_action_project vap ON vap.id = a.id
+    WHERE (a.error_message IS NULL OR a.error_message NOT LIKE 'reconciled:%')
+    GROUP BY vap.resolved_project, iso_week
+),
+transcript_agg AS (
+    SELECT
+        COALESCE(
+            s.project,
+            (SELECT pc.project FROM project_context pc
+             WHERE pc.scope = 'global'
+               AND pc.declared_at <= tu.timestamp
+               AND (pc.ended_at IS NULL OR pc.ended_at > tu.timestamp)
+             ORDER BY pc.declared_at DESC LIMIT 1),
+            'unattributed'
+        ) AS project,
+        strftime('%Y-%W', tu.timestamp) AS iso_week,
+        ROUND(SUM(tu.cost_estimate), 4) AS cost_usd_listprice_equivalent
+    FROM token_usage tu
+    JOIN sessions s ON s.session_id = tu.session_id
+    WHERE tu.source = 'claude_code_transcript'
+    GROUP BY project, iso_week
+),
+human_agg AS (
+    SELECT
+        project,
+        strftime('%Y-%W', started_at) AS iso_week,
+        ROUND(SUM((julianday(COALESCE(ended_at, datetime('now'))) - julianday(started_at)) * 24.0), 2) AS human_hours
+    FROM human_hours
+    GROUP BY project, iso_week
+)
+SELECT
+    agent_agg.project,
+    agent_agg.iso_week,
+    agent_agg.actions,
+    agent_agg.distinct_agents,
+    agent_agg.distinct_sessions,
+    agent_agg.agent_hours,
+    agent_agg.cost_usd,
+    COALESCE(transcript_agg.cost_usd_listprice_equivalent, 0) AS cost_usd_listprice_equivalent,
+    COALESCE(human_agg.human_hours, 0) AS human_hours,
+    CASE WHEN COALESCE(human_agg.human_hours, 0) > 0
+         THEN ROUND(agent_agg.cost_usd / human_agg.human_hours, 4)
+         ELSE NULL END AS usd_per_human_hour
+FROM agent_agg
+LEFT JOIN transcript_agg
+  ON transcript_agg.project = agent_agg.project AND transcript_agg.iso_week = agent_agg.iso_week
+LEFT JOIN human_agg
+  ON human_agg.project = agent_agg.project AND human_agg.iso_week = agent_agg.iso_week
+ORDER BY agent_agg.iso_week DESC, agent_agg.cost_usd DESC
+/* v_project_cost_weekly(project,iso_week,actions,distinct_agents,distinct_sessions,agent_hours,cost_usd,cost_usd_listprice_equivalent,human_hours,usd_per_human_hour) */;
+
+-- Stage 8 (ROI/Tiempos/Costes/Performance addendum, see
+-- /root/.claude/plans/distributed-wobbling-gem.md): infra cost allocation, ROI,
+-- budget deviation, context fragmentation and rework-proxy views. Human-hour cost
+-- uses the latest labor_rates.rate_eur_hour (revisable via project_ctl.py rate set,
+-- no view migration needed); technical LLM cost (v_project_cost_weekly.cost_usd) is
+-- near-zero on flat-rate/free tiers and kept informational-only, not summed into EUR.
+CREATE VIEW IF NOT EXISTS v_infra_cost_weekly AS
+WITH weekly_pool AS (
+    -- COALESCE guards SUM() of zero rows (all infra_costs retired/none seeded
+    -- yet): without it pool_eur is NULL, propagating to a NULL infra_cost_eur
+    -- (not 0) below — a disaster-scenario edge case found 2026-08-12.
+    SELECT ROUND(COALESCE(SUM(importe_eur_mes), 0) / 4.345, 4) AS pool_eur
+    FROM infra_costs
+    WHERE activo_hasta IS NULL
+),
+project_hours AS (
+    SELECT project, iso_week, agent_hours,
+           SUM(agent_hours) OVER (PARTITION BY iso_week) AS total_hours_week
+    FROM v_project_cost_weekly
+)
+SELECT
+    ph.project,
+    ph.iso_week,
+    ROUND(CASE WHEN ph.total_hours_week > 0
+               THEN (ph.agent_hours / ph.total_hours_week) * wp.pool_eur
+               ELSE 0 END, 4) AS infra_cost_eur
+FROM project_hours ph
+CROSS JOIN weekly_pool wp
+/* v_infra_cost_weekly(project,iso_week,infra_cost_eur) — allocates the current active
+   infra_costs monthly pool proportionally by each project's agent_hours share that week;
+   only reflects currently-active cost rows, not historical infra changes. */;
+
+CREATE VIEW IF NOT EXISTS v_project_roi AS
+WITH value_agg AS (
+    SELECT project,
+           ROUND(SUM(CASE WHEN tipo IN ('fee_cobrado','hito_entregado') THEN importe_eur ELSE 0 END), 2) AS ingresos_eur
+    FROM project_value GROUP BY project
+),
+tech_agg AS (
+    SELECT project, ROUND(SUM(cost_usd), 4) AS cost_usd_technical
+    FROM v_project_cost_weekly GROUP BY project
+),
+human_agg AS (
+    -- Sourced directly from human_hours, NOT via v_project_cost_weekly.human_hours:
+    -- that view's FROM agent_agg LEFT JOIN human_agg drops any (project, iso_week)
+    -- with logged human hours but zero agent_actions that week, silently
+    -- understating coste_humano_eur (Opus panel-review P1, 2026-08-12).
+    SELECT project,
+           ROUND(SUM((julianday(COALESCE(ended_at, datetime('now'))) - julianday(started_at)) * 24.0), 2) AS human_hours
+    FROM human_hours GROUP BY project
+),
+infra_agg AS (
+    SELECT project, ROUND(SUM(infra_cost_eur), 2) AS infra_cost_eur
+    FROM v_infra_cost_weekly GROUP BY project
+),
+rate AS (
+    SELECT rate_eur_hour FROM labor_rates ORDER BY effective_date DESC, id DESC LIMIT 1
+),
+all_projects AS (
+    -- Union of every source a cost/value can come from, not just value_agg:
+    -- a project with real costs but no logged project_value row must still
+    -- surface here (Opus panel-review P2, 2026-08-12) — invisible unbilled
+    -- work is exactly the failure mode ROI reporting exists to catch.
+    SELECT project FROM value_agg
+    UNION SELECT project FROM human_agg
+    UNION SELECT project FROM infra_agg
+)
+SELECT
+    all_projects.project,
+    COALESCE(value_agg.ingresos_eur, 0) AS ingresos_eur,
+    COALESCE(tech_agg.cost_usd_technical, 0) AS coste_tecnico_usd_informativo,
+    COALESCE(human_agg.human_hours, 0) AS human_hours,
+    ROUND(COALESCE(human_agg.human_hours, 0) * (SELECT rate_eur_hour FROM rate), 2) AS coste_humano_eur,
+    COALESCE(infra_agg.infra_cost_eur, 0) AS coste_infra_eur,
+    ROUND(COALESCE(value_agg.ingresos_eur, 0)
+          - (COALESCE(human_agg.human_hours, 0) * (SELECT rate_eur_hour FROM rate))
+          - COALESCE(infra_agg.infra_cost_eur, 0), 2) AS roi_eur
+FROM all_projects
+LEFT JOIN value_agg ON value_agg.project = all_projects.project
+LEFT JOIN tech_agg ON tech_agg.project = all_projects.project
+LEFT JOIN human_agg ON human_agg.project = all_projects.project
+LEFT JOIN infra_agg ON infra_agg.project = all_projects.project
+/* v_project_roi(project,ingresos_eur,coste_tecnico_usd_informativo,human_hours,coste_humano_eur,coste_infra_eur,roi_eur) — includes projects with costs but no project_value row (ingresos_eur=0); human_hours summed directly from human_hours, independent of agent_actions presence. */;
+
+CREATE VIEW IF NOT EXISTS v_context_fragmentation AS
+WITH gaps AS (
+    SELECT vap.resolved_project AS project, a.session_id,
+           (julianday(a.timestamp) - julianday(
+               LAG(a.timestamp) OVER (PARTITION BY a.session_id ORDER BY a.timestamp)
+           )) * 86400.0 AS gap_seconds
+    FROM agent_actions a
+    JOIN v_action_project vap ON vap.id = a.id
+)
+SELECT project, COUNT(*) AS gap_samples, ROUND(AVG(gap_seconds), 1) AS mean_gap_s, ROUND(MAX(gap_seconds), 1) AS max_gap_s
+FROM gaps WHERE gap_seconds IS NOT NULL GROUP BY project
+/* v_context_fragmentation(project,gap_samples,mean_gap_s,max_gap_s) */;
+
+CREATE VIEW IF NOT EXISTS v_budget_deviation AS
+WITH cost_agg AS (
+    -- Sourced directly from human_hours, see v_project_roi's human_agg comment
+    -- (Opus panel-review P1, 2026-08-12) — same drop-on-agent_actions-absent bug.
+    SELECT project,
+           ROUND(SUM((julianday(COALESCE(ended_at, datetime('now'))) - julianday(started_at)) * 24.0), 2) AS human_hours
+    FROM human_hours GROUP BY project
+),
+infra_agg AS (
+    SELECT project, ROUND(SUM(infra_cost_eur), 2) AS infra_cost_eur
+    FROM v_infra_cost_weekly GROUP BY project
+),
+rate AS (
+    SELECT rate_eur_hour FROM labor_rates ORDER BY effective_date DESC, id DESC LIMIT 1
+)
+SELECT
+    pb.project,
+    pb.presupuesto_eur,
+    COALESCE(cost_agg.human_hours, 0) AS human_hours,
+    ROUND(COALESCE(cost_agg.human_hours, 0) * (SELECT rate_eur_hour FROM rate), 2) AS coste_humano_eur,
+    COALESCE(infra_agg.infra_cost_eur, 0) AS coste_infra_eur,
+    ROUND((COALESCE(cost_agg.human_hours, 0) * (SELECT rate_eur_hour FROM rate)) + COALESCE(infra_agg.infra_cost_eur, 0), 2) AS coste_total_eur,
+    CASE WHEN pb.presupuesto_eur > 0
+         THEN ROUND((((COALESCE(cost_agg.human_hours, 0) * (SELECT rate_eur_hour FROM rate)) + COALESCE(infra_agg.infra_cost_eur, 0)) / pb.presupuesto_eur - 1) * 100.0, 1)
+         ELSE NULL END AS desviacion_pct
+FROM project_budget pb
+LEFT JOIN cost_agg ON cost_agg.project = pb.project
+LEFT JOIN infra_agg ON infra_agg.project = pb.project
+/* v_budget_deviation(project,presupuesto_eur,human_hours,coste_humano_eur,coste_infra_eur,coste_total_eur,desviacion_pct) */;
+
+CREATE VIEW IF NOT EXISTS v_rework_signal AS
+SELECT
+    a1.id AS first_action_id, a2.id AS rework_action_id,
+    vap1.resolved_project AS project, a1.file_path,
+    a1.timestamp AS first_edit_at, a2.timestamp AS reedit_at,
+    ROUND((julianday(a2.timestamp) - julianday(a1.timestamp)) * 24.0, 2) AS hours_between
+FROM agent_actions a1
+JOIN v_action_project vap1 ON vap1.id = a1.id
+JOIN agent_actions a2
+  ON a2.file_path = a1.file_path AND a2.id != a1.id AND a2.timestamp > a1.timestamp
+ AND (julianday(a2.timestamp) - julianday(a1.timestamp)) * 24.0 <= 24.0
+WHERE a1.tool_used IN ('Edit','Write','MultiEdit') AND a2.tool_used IN ('Edit','Write','MultiEdit')
+  AND a1.file_path IS NOT NULL
+/* v_rework_signal(first_action_id,rework_action_id,project,file_path,first_edit_at,reedit_at,hours_between) — REWORK_WINDOW_HOURS=24.0 hardcoded from bin/core/project_context.py; heuristic proxy only (same file re-touched within the window), not a quality measure. */;
+
+CREATE VIEW IF NOT EXISTS v_agent_efficiency AS
+WITH per_request AS (
+    SELECT
+        a.request_id,
+        a.agent_name,
+        vap.resolved_project AS project,
+        COUNT(*) AS attempts,
+        MAX(a.success) AS request_succeeded,
+        SUM(COALESCE(a.duration_ms, 0)) AS request_duration_ms,
+        SUM(COALESCE(a.estimated_cost_usd, 0)) AS request_cost_usd,
+        SUM(COALESCE(a.tokens_input, 0) + COALESCE(a.tokens_output, 0)) AS request_tokens
+    FROM agent_actions a
+    JOIN v_action_project vap ON vap.id = a.id
+    WHERE a.request_id IS NOT NULL
+      AND (a.error_message IS NULL OR a.error_message NOT LIKE 'reconciled:%')
+    GROUP BY a.request_id, a.agent_name, vap.resolved_project
+)
+SELECT
+    agent_name,
+    project,
+    COUNT(*) AS total_requests,
+    ROUND(AVG(request_succeeded) * 100, 1) AS success_rate_pct,
+    ROUND(AVG(request_duration_ms)) AS avg_duration_ms,
+    ROUND(
+        SUM(CASE WHEN request_succeeded = 1 THEN request_cost_usd ELSE 0 END)
+        / NULLIF(SUM(CASE WHEN request_succeeded = 1 THEN 1 ELSE 0 END), 0), 6
+    ) AS avg_cost_usd_per_success,
+    ROUND(
+        SUM(CASE WHEN request_succeeded = 1 THEN request_tokens ELSE 0 END) * 1.0
+        / NULLIF(SUM(CASE WHEN request_succeeded = 1 THEN 1 ELSE 0 END), 0), 1
+    ) AS avg_tokens_per_success,
+    ROUND(SUM(CASE WHEN attempts > 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) AS cascade_retry_rate_pct
+FROM per_request
+GROUP BY agent_name, project
+ORDER BY total_requests DESC
+/* v_agent_efficiency(agent_name,project,total_requests,success_rate_pct,avg_duration_ms,avg_cost_usd_per_success,avg_tokens_per_success,cascade_retry_rate_pct) */;
 CREATE VIEW IF NOT EXISTS v_dq_uplift AS
 SELECT
     model,
@@ -946,6 +1257,12 @@ CREATE TABLE IF NOT EXISTS chunk_health (
     reviewed_at TEXT    DEFAULT (datetime('now')),
     FOREIGN KEY (chunk_id) REFERENCES vector_chunks(id)
 );
+-- Stage 5 (2026-08-13): rows with source='claude_code_transcript' are written
+-- by stop.py from the Claude Code transcript JSONL. cost_estimate there is
+-- LIST-PRICE-EQUIVALENT, not billed spend — this VPS runs Claude Max OAuth
+-- (flat-rate subscription), so the figure is a relative cost-efficiency proxy
+-- across projects/agents/models, not what is actually paid. No project column:
+-- join on session_id -> sessions.project.
 CREATE TABLE IF NOT EXISTS token_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1002,3 +1319,353 @@ CREATE TABLE IF NOT EXISTS agno_agent_registry (
     tier         TEXT,
     created_at   TEXT DEFAULT (datetime('now'))
 );
+
+-- jarvis-control3 v2: human_pending_tasks + resumable_actions + schema_migrations.
+-- SSOT copy for fresh installs. Must match database/migrations/2026-07-01_human_pending_tasks.up.sql
+-- (design: my-projects/jarvis-control3/architecture/02-data-model.md, 09-state-machine-triggers.md).
+CREATE TABLE IF NOT EXISTS resumable_actions (
+  action_id           TEXT PRIMARY KEY,
+  kind                TEXT NOT NULL CHECK(kind IN ('standalone_script','claude_agent')),
+  entrypoint          TEXT NOT NULL,
+  arg_schema          TEXT NOT NULL,
+  requires_checkpoint INTEGER NOT NULL DEFAULT 0,
+  enabled             INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS human_pending_tasks (
+  id                  TEXT PRIMARY KEY,
+  dedup_key           TEXT NOT NULL,
+  schema_version      INTEGER NOT NULL DEFAULT 2,
+
+  project             TEXT NOT NULL CHECK(project IN ('football-value','intl-reports','hostkey','pokemon-genesis-chaos')),
+  action_id           TEXT NOT NULL REFERENCES resumable_actions(action_id),
+  blocking_type       TEXT NOT NULL CHECK(blocking_type IN ('captcha','login','2fa','ip_ban','rate_limit','manual_review','other')),
+  description         TEXT NOT NULL CHECK(length(description) <= 500),
+  target_url          TEXT,
+  screenshot_ref      TEXT,
+  priority            INTEGER NOT NULL DEFAULT 3 CHECK(priority BETWEEN 1 AND 5),
+
+  resume_args         TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(resume_args) AND length(resume_args) <= 4096),
+  checkpoint_ref       TEXT,
+  secret_ref           TEXT,
+  payload_hash          TEXT NOT NULL,
+
+  created_by            TEXT NOT NULL,
+  origin_host            TEXT NOT NULL CHECK(origin_host IN ('netcup','hostinger','windows')),
+  origin_pid             INTEGER,
+  origin_run_id          TEXT,
+  allowed_chat_id        TEXT NOT NULL,
+  resolved_by            TEXT,
+  resolution_outcome     TEXT CHECK(resolution_outcome IN ('resumed_ok','resumed_failed','manual','discarded','expired_auto') OR resolution_outcome IS NULL),
+
+  status                 TEXT NOT NULL DEFAULT 'pending'
+                         CHECK(status IN ('pending','notified','unblocked','claimed','resuming','completed','failed','expired','cancelled')),
+  claimed_by             TEXT,
+  lease_until            TEXT,
+  version                INTEGER NOT NULL DEFAULT 0,
+
+  notified_at            TEXT,
+  notify_count           INTEGER NOT NULL DEFAULT 0,
+  notification_msg_id    TEXT,
+
+  attempts               INTEGER NOT NULL DEFAULT 0,
+  max_attempts            INTEGER NOT NULL DEFAULT 3,
+  next_retry_at          TEXT,
+  last_error              TEXT,
+
+  created_at             TEXT NOT NULL,
+  updated_at             TEXT NOT NULL,
+  expires_at             TEXT NOT NULL,
+  session_deadline       TEXT,
+  resolved_at            TEXT,
+
+  is_test                 INTEGER NOT NULL DEFAULT 0,
+  archived                INTEGER NOT NULL DEFAULT 0,
+
+  CHECK ( (status IN ('completed','failed','expired','cancelled')) = (resolved_at IS NOT NULL) )
+);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version     TEXT PRIMARY KEY,
+  applied_at  TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_pending_dedup ON human_pending_tasks(dedup_key)
+    WHERE status IN ('pending','notified','unblocked','claimed','resuming');
+CREATE INDEX IF NOT EXISTS ix_poll   ON human_pending_tasks(status, project) WHERE archived = 0;
+CREATE INDEX IF NOT EXISTS ix_expiry ON human_pending_tasks(expires_at)      WHERE status IN ('pending','notified','unblocked');
+
+CREATE TRIGGER IF NOT EXISTS trg_hpt_valid_transition
+BEFORE UPDATE OF status ON human_pending_tasks
+FOR EACH ROW
+WHEN NOT (
+  (OLD.status = 'pending'   AND NEW.status IN ('notified','expired','cancelled')) OR
+  (OLD.status = 'notified'  AND NEW.status IN ('unblocked','expired','cancelled')) OR
+  (OLD.status = 'unblocked' AND NEW.status IN ('claimed','expired','cancelled')) OR
+  (OLD.status = 'claimed'   AND NEW.status IN ('resuming','failed','expired','cancelled')) OR
+  (OLD.status = 'resuming'  AND NEW.status IN ('completed','failed')) OR
+  (OLD.status = 'failed'    AND NEW.status IN ('claimed','expired','cancelled')) OR
+  (OLD.status = NEW.status)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid status transition');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_hpt_immutable_exec_fields
+BEFORE UPDATE OF action_id, resume_args, checkpoint_ref, payload_hash ON human_pending_tasks
+FOR EACH ROW
+WHEN NEW.action_id IS NOT OLD.action_id
+  OR NEW.resume_args IS NOT OLD.resume_args
+  OR NEW.checkpoint_ref IS NOT OLD.checkpoint_ref
+  OR NEW.payload_hash IS NOT OLD.payload_hash
+BEGIN
+  SELECT RAISE(ABORT, 'execution fields are immutable after insert');
+END;
+
+-- agent_actions / instincts append-only enforcement (stress-db.md #6/#7/#8, 2026-08-11).
+-- Previously "append-only by convention" only — a bare DELETE/UPDATE from any process
+-- with filesystem access succeeded silently. agent_actions rows are write-once-then-closed
+-- (post_tool_use.py / post_tool_use_failure.py fill end_time_ms/duration_ms/success/
+-- error_message/bytes_written exactly once on an open row); instincts rows keep
+-- keyword/pattern/source/project/created_at fixed forever while times_applied/
+-- times_successful/confidence/last_applied evolve (stop.py, bin/agents/memory_decay.py).
+CREATE TRIGGER IF NOT EXISTS trg_agent_actions_no_delete
+BEFORE DELETE ON agent_actions
+BEGIN
+  SELECT RAISE(ABORT, 'agent_actions is append-only: DELETE is not permitted');
+END;
+
+-- Blocks `INSERT OR REPLACE`/`INSERT ... ON CONFLICT(id) DO ...` targeting an
+-- existing id: SQLite's REPLACE conflict resolution deletes the old row and
+-- inserts the new one as a single INSERT statement, and (with the default
+-- recursive_triggers=0) that implicit delete does NOT fire trg_*_no_delete —
+-- so REPLACE was a full bypass of every append-only/immutability trigger
+-- below. A genuine autoincrement insert never supplies a colliding id, so
+-- this cannot reject legitimate writes (stress-reverify-and-gaps.md, 2026-08-11).
+CREATE TRIGGER IF NOT EXISTS trg_agent_actions_no_replace
+BEFORE INSERT ON agent_actions
+FOR EACH ROW
+WHEN NEW.id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM agent_actions WHERE id = NEW.id)
+BEGIN
+  SELECT RAISE(ABORT, 'agent_actions is append-only: INSERT OR REPLACE over an existing id is not permitted');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_agent_actions_close_once
+BEFORE UPDATE ON agent_actions
+FOR EACH ROW
+WHEN OLD.end_time_ms IS NOT NULL
+  OR NEW.id IS NOT OLD.id
+  OR NEW.timestamp IS NOT OLD.timestamp
+  OR NEW.session_id IS NOT OLD.session_id
+  OR NEW.agent_name IS NOT OLD.agent_name
+  OR NEW.project IS NOT OLD.project
+  OR NEW.tool_used IS NOT OLD.tool_used
+  OR NEW.file_path IS NOT OLD.file_path
+  OR NEW.action_type IS NOT OLD.action_type
+  OR NEW.start_time_ms IS NOT OLD.start_time_ms
+  OR NEW.model_used IS NOT OLD.model_used
+  OR NEW.tokens_used IS NOT OLD.tokens_used
+  OR NEW.files_modified IS NOT OLD.files_modified
+  OR NEW.worktree IS NOT OLD.worktree
+  OR NEW.skills_active IS NOT OLD.skills_active
+  OR NEW.blocked_by_hook IS NOT OLD.blocked_by_hook
+  OR NEW.cost_eur IS NOT OLD.cost_eur
+  OR NEW.model_tier IS NOT OLD.model_tier
+  OR NEW.tokens_input IS NOT OLD.tokens_input
+  OR NEW.tokens_output IS NOT OLD.tokens_output
+  OR NEW.estimated_cost_usd IS NOT OLD.estimated_cost_usd
+  OR NEW.tier IS NOT OLD.tier
+  OR NEW.domain_enriched IS NOT OLD.domain_enriched
+  OR NEW.domain IS NOT OLD.domain
+  OR NEW.knowledge_chunks_used IS NOT OLD.knowledge_chunks_used
+  OR NEW.energy_wh IS NOT OLD.energy_wh
+  OR NEW.cpu_percent IS NOT OLD.cpu_percent
+  OR NEW.input_tokens IS NOT OLD.input_tokens
+  OR NEW.output_tokens IS NOT OLD.output_tokens
+  OR NEW.notes IS NOT OLD.notes
+  OR NEW.request_id IS NOT OLD.request_id
+BEGIN
+  SELECT RAISE(ABORT, 'agent_actions rows are immutable except a single close-out update (end_time_ms/duration_ms/success/error_message/bytes_written) while end_time_ms IS NULL');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_instincts_no_delete
+BEFORE DELETE ON instincts
+BEGIN
+  SELECT RAISE(ABORT, 'instincts is append-only: DELETE is not permitted');
+END;
+
+-- Same REPLACE-bypass fix as trg_agent_actions_no_replace above.
+CREATE TRIGGER IF NOT EXISTS trg_instincts_no_replace
+BEFORE INSERT ON instincts
+FOR EACH ROW
+WHEN NEW.id IS NOT NULL
+  AND EXISTS (SELECT 1 FROM instincts WHERE id = NEW.id)
+BEGIN
+  SELECT RAISE(ABORT, 'instincts is append-only: INSERT OR REPLACE over an existing id is not permitted');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_instincts_immutable_identity
+BEFORE UPDATE ON instincts
+FOR EACH ROW
+WHEN NEW.id IS NOT OLD.id
+  OR NEW.keyword IS NOT OLD.keyword
+  OR NEW.pattern IS NOT OLD.pattern
+  OR NEW.source IS NOT OLD.source
+  OR NEW.project IS NOT OLD.project
+  OR NEW.created_at IS NOT OLD.created_at
+BEGIN
+  SELECT RAISE(ABORT, 'instincts identity fields (keyword/pattern/source/project/created_at) are immutable after insert');
+END;
+
+-- human_hours: human work-session log (dashboard production tracking,
+-- design: docs/superpowers/specs/2026-08-11-dashboard-production-tracking-design.md).
+-- Append-only by convention only (NOT DB-enforced via trigger, unlike agent_actions/
+-- instincts): corrections should be new rows with a note, never UPDATE of
+-- started_at/source, except the single UPDATE that closes an open session by
+-- setting ended_at (the app code in Task 6 is the only writer of that UPDATE).
+CREATE TABLE IF NOT EXISTS human_hours (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  project     TEXT NOT NULL,
+  started_at  TEXT NOT NULL,
+  ended_at    TEXT,
+  note        TEXT,
+  source      TEXT NOT NULL CHECK(source IN ('manual','telegram'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_human_hours_open
+  ON human_hours(project) WHERE ended_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_human_hours_project_started
+  ON human_hours(project, started_at);
+
+-- project_context: single source of truth for "current project" (Stage 2,
+-- DB attribution rebuild). Mirrors human_hours' shape. SSOT copy for fresh
+-- installs — must match database/migrations/2026-08-13_project_context.up.sql.
+CREATE TABLE IF NOT EXISTS project_context (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope       TEXT NOT NULL,
+  project     TEXT NOT NULL,
+  declared_at TEXT NOT NULL,
+  declared_by TEXT NOT NULL CHECK(declared_by IN ('telegram','cli','session_start','prompt','api')),
+  source_detail TEXT,
+  ended_at    TEXT,
+  status      TEXT NOT NULL DEFAULT 'activo' CHECK (status IN ('activo','pausado','entregado','abandonado'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_project_context_open
+  ON project_context(scope) WHERE ended_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_project_context_project
+  ON project_context(project, declared_at);
+
+-- Stage 8 (ROI/Tiempos/Costes/Performance addendum, see
+-- /root/.claude/plans/distributed-wobbling-gem.md): project revenue, budget targets,
+-- real infra costs, and the revisable labor rate used to price human hours in
+-- v_project_roi / v_budget_deviation. Live DB: applied via
+-- database/migrations/2026-08-13_project_value_and_budget.up.sql
+-- (status column above: database/migrations/2026-08-13_project_context_status.up.sql).
+CREATE TABLE IF NOT EXISTS project_value (
+  id INTEGER PRIMARY KEY,
+  project TEXT NOT NULL,
+  fecha TEXT NOT NULL DEFAULT (datetime('now')),
+  tipo TEXT NOT NULL CHECK (tipo IN ('fee_cobrado','hito_entregado','valor_estimado')),
+  importe_eur REAL NOT NULL,
+  nota TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_value_project ON project_value(project, fecha);
+
+CREATE TABLE IF NOT EXISTS project_budget (
+  project TEXT PRIMARY KEY,
+  presupuesto_eur REAL NOT NULL,
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS infra_costs (
+  id INTEGER PRIMARY KEY,
+  item TEXT NOT NULL,
+  importe_eur_mes REAL NOT NULL,
+  activo_desde TEXT NOT NULL DEFAULT (date('now')),
+  activo_hasta TEXT,
+  nota TEXT
+);
+
+CREATE TABLE IF NOT EXISTS labor_rates (
+  id INTEGER PRIMARY KEY,
+  rate_eur_hour REAL NOT NULL,
+  basis TEXT,
+  effective_date TEXT NOT NULL DEFAULT (date('now'))
+);
+
+-- nl_match_candidates: shadow-layer observability for the NL project matcher
+-- (D2). Never read by resolve_project() or attribution.
+CREATE TABLE IF NOT EXISTS nl_match_candidates (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+  prompt_excerpt           TEXT NOT NULL,
+  matched_project           TEXT NOT NULL,
+  confidence                REAL NOT NULL,
+  matched_at                TEXT NOT NULL,
+  precision_matcher_agreed  INTEGER NOT NULL DEFAULT 0
+);
+
+-- human_pending_events: append-only ledger (jarvis-control3 v2).
+-- SSOT copy for fresh installs. Must match database/migrations/2026-07-02_human_pending_events.up.sql
+-- (design: my-projects/jarvis-control3/architecture/07-durable-worker.md).
+-- FK not enforced at runtime (get_db does not enable PRAGMA foreign_keys); the
+-- task row is always inserted before any of its events.
+CREATE TABLE IF NOT EXISTS human_pending_events (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES human_pending_tasks(id),
+    ts      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+    event   TEXT NOT NULL,          -- 'inserted'|'notify_attempt'|'notify_ok'|'notify_failed'|'status_update_failed'|'reconciled'|'poller_exhausted'|'resolved_by_user'
+    detail  TEXT                    -- JSON: {attempt, error, message_id, ...} sin secretos/payload crudo
+);
+
+CREATE INDEX IF NOT EXISTS ix_hpt_events_task ON human_pending_events(task_id, ts);
+
+-- ── 2026-07-05 performance indexes (audit §3: hot query paths) ──────────────
+CREATE INDEX IF NOT EXISTS idx_error_log_action_id ON error_log(action_id);
+CREATE INDEX IF NOT EXISTS idx_amplification_log_created_at ON amplification_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
+
+
+-- Added 2026-08-14: DB consolidation (session_memory from dqiii8_history.db)
+CREATE TABLE IF NOT EXISTS session_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+            content TEXT NOT NULL,
+            domain TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+
+-- ── security_findings ───────────────────────────────────────────────────────
+-- Added 2026-08-17 (governance remediation Gap 11). Purely additive.
+-- Backs the de-duplication step of `.claude/skills/red-team/SKILL.md`
+-- ("Check security_findings DB for duplicates"), which queried this table
+-- before it existed and silently swallowed the error. Columns mirror the
+-- vocabulary the skill's own report format already uses: finding_id (RT-001),
+-- title, severity, status, file:line locator, proof, impact.
+CREATE TABLE IF NOT EXISTS security_findings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    finding_id    TEXT,                                  -- report-local ref, e.g. 'RT-001'
+    title         TEXT NOT NULL,
+    severity      TEXT CHECK(severity IN ('CRITICAL','HIGH','MEDIUM','LOW','INFO')),
+    status        TEXT NOT NULL DEFAULT 'REAL'
+                  CHECK(status IN ('REAL','MITIGATED','FALSE_POSITIVE','ALREADY_FIXED','RESOLVED')),
+    category      TEXT,                                  -- OWASP category
+    source        TEXT,                                  -- skill/agent that filed it, e.g. 'red-team'
+    file_path     TEXT,                                  -- 'path/to/file.py:123'
+    proof         TEXT,                                  -- reproducible command/payload
+    impact        TEXT,
+    report_path   TEXT,                                  -- the report this came from
+    resolved      INTEGER NOT NULL DEFAULT 0,            -- 0/1, mirrors error_log convention
+    resolution    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_findings_created ON security_findings(created_at);
+CREATE INDEX IF NOT EXISTS idx_security_findings_status  ON security_findings(status, severity);

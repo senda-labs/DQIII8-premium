@@ -34,6 +34,20 @@ LESSONS = JARVIS / "tasks" / "lessons.md"
 PROJECTS = JARVIS / "projects"
 NOW = datetime.now().isoformat()
 
+
+def _resolve_project() -> str:
+    """DB-backed project resolution — replaces the dead DQIII8_PROJECT env
+    var, which no writer sets."""
+    try:
+        _bin_root = str(JARVIS / "bin")
+        if _bin_root not in sys.path:
+            sys.path.insert(0, _bin_root)
+        from core.action_log import resolve_project_safe
+
+        return resolve_project_safe(session, cwd=data.get("cwd")) or "dqiii8-core"
+    except Exception:
+        return "dqiii8-core"
+
 # ── 0. Count lessons added this session ───────────────────────────
 lessons_added = 0
 result = None  # kept for instinct extraction in step 0b
@@ -234,7 +248,7 @@ try:
                         _kw,
                         _pat,
                         "lessons.md",
-                        os.environ.get("DQIII8_PROJECT", "dqiii8-core"),
+                        _resolve_project(),
                         NOW,
                         NOW,
                     ),
@@ -264,7 +278,6 @@ try:
         _vdur_min = ((_vtime.time() * 1000 - _vfirst_ms) / 60000) if _vfirst_ms else 0
 
         if _vdur_min >= 10:
-            # Collect modified files from git diff
             _vdiff = subprocess.run(
                 ["git", "-C", str(JARVIS), "diff", "--stat", "HEAD"],
                 capture_output=True,
@@ -317,7 +330,7 @@ try:
                     _ve = _vraw.rfind("]")
                     if _vs != -1 and _ve != -1:
                         _vfacts = _vjson.loads(_vraw[_vs : _ve + 1])
-                        _vproject = os.environ.get("DQIII8_PROJECT", "dqiii8-core")
+                        _vproject = _resolve_project()
                         _vic = _vsl3.connect(str(DB), timeout=5)
                         _vcnt = 0
                         for _vf in _vfacts[:5]:
@@ -351,7 +364,6 @@ try:
             "SELECT id, keyword, confidence, times_applied, last_applied FROM instincts"
         ).fetchall()
         if _instincts:
-            # Build vault corpus (all entries as searchable text)
             _vault_corpus = " ".join(
                 f"{r[0]} {r[1]} {r[2]}"
                 for r in _ic.execute(
@@ -412,8 +424,8 @@ try:
                 " FROM agent_actions WHERE session_id=?",
                 (session,),
             ).fetchone()
-            _proj = os.environ.get("DQIII8_PROJECT", "dqiii8-core")
-            _model = os.environ.get("DQIII8_MODEL", "claude-sonnet-4-6")
+            _proj = _resolve_project()
+            _model = os.environ.get("DQIII8_MODEL", "claude-sonnet-5")
             _total_actions = row[0] or 0
             _start_time = row[4] or NOW  # earliest action timestamp
             _total_duration_ms = row[5] or 0
@@ -463,6 +475,133 @@ try:
                 )
 except Exception as e:
     _log.warning("session-close DB failed", exc_info=True)
+
+# ── 1a2. Real cost capture from Claude Code transcript (Stage 5) ──
+# NOTE (Correction E): this VPS runs Claude Max OAuth (flat-rate subscription),
+# so the cost computed here is LIST-PRICE-EQUIVALENT, not billed spend — a
+# relative cost-efficiency proxy across projects/agents/models, not what Iker
+# actually pays. See schema_v2.sql's comment on token_usage for the same note.
+_ANTHROPIC_PRICING_PER_MTOK = {
+    # model substring -> (input, output, cache_write, cache_read) USD / 1M tokens
+    "opus": (15.0, 75.0, 18.75, 1.50),
+    "sonnet": (3.0, 15.0, 3.75, 0.30),
+    "haiku": (1.0, 5.0, 1.25, 0.10),
+}
+
+
+def _pricing_for_model(model_id: str):
+    m = (model_id or "").lower()
+    if "opus" in m:
+        return _ANTHROPIC_PRICING_PER_MTOK["opus"]
+    if "haiku" in m:
+        return _ANTHROPIC_PRICING_PER_MTOK["haiku"]
+    return _ANTHROPIC_PRICING_PER_MTOK["sonnet"]  # default: sonnet is the common case
+
+
+def _tier_for_model(model_id: str) -> str | None:
+    m = (model_id or "").lower()
+    if "opus" in m:
+        return "S"
+    if "sonnet" in m:
+        return "A"
+    if "haiku" in m:
+        return "B"
+    return None
+
+
+try:
+    _transcript_path = data.get("transcript_path", "")
+    if not _transcript_path:
+        _cwd_str = str(Path(data.get("cwd", str(JARVIS))).resolve())
+        _slug = _cwd_str.replace("/", "-")
+        _cand = Path.home() / ".claude" / "projects" / _slug / f"{session}.jsonl"
+        _transcript_path = str(_cand) if _cand.exists() else ""
+
+    if _transcript_path and Path(_transcript_path).exists() and DB.exists():
+        _per_model: dict[str, dict[str, int]] = {}
+        _seen_msg_ids: set[str] = set()
+        with open(_transcript_path, encoding="utf-8") as _tf:
+            for _line in _tf:
+                _line = _line.strip()
+                if not _line:
+                    continue
+                try:
+                    _entry = json.loads(_line)
+                except Exception:
+                    continue
+                _msg = _entry.get("message")
+                if not isinstance(_msg, dict):
+                    continue
+                _usage = _msg.get("usage")
+                if not _usage:
+                    continue
+                # Streaming transcripts repeat the same message id (and its
+                # cumulative usage) across multiple JSONL lines — dedupe or
+                # every re-run/parse would multiply-count the same tokens.
+                _mid = _msg.get("id")
+                if _mid:
+                    if _mid in _seen_msg_ids:
+                        continue
+                    _seen_msg_ids.add(_mid)
+                _model = _msg.get("model", "unknown")
+                _acc = _per_model.setdefault(
+                    _model, {"input": 0, "output": 0, "cache_creation": 0, "cache_read": 0}
+                )
+                _acc["input"] += _usage.get("input_tokens", 0) or 0
+                _acc["output"] += _usage.get("output_tokens", 0) or 0
+                _acc["cache_creation"] += _usage.get("cache_creation_input_tokens", 0) or 0
+                _acc["cache_read"] += _usage.get("cache_read_input_tokens", 0) or 0
+
+        if _per_model:
+            import sqlite3 as _tsl3
+
+            _tconn = _tsl3.connect(str(DB), timeout=5)
+            # Idempotence: this session's transcript-derived rows are fully
+            # recomputed on every stop.py run, never accumulated across runs.
+            _tconn.execute(
+                "DELETE FROM token_usage WHERE session_id=? AND source='claude_code_transcript'",
+                (session,),
+            )
+            _grand_total = 0
+            for _model, _acc in _per_model.items():
+                _pin, _pout, _pcw, _pcr = _pricing_for_model(_model)
+                _cost = (
+                    _acc["input"] / 1_000_000 * _pin
+                    + _acc["output"] / 1_000_000 * _pout
+                    + _acc["cache_creation"] / 1_000_000 * _pcw
+                    + _acc["cache_read"] / 1_000_000 * _pcr
+                )
+                _model_total = (
+                    _acc["input"] + _acc["output"] + _acc["cache_creation"] + _acc["cache_read"]
+                )
+                _grand_total += _model_total
+                _tconn.execute(
+                    "INSERT INTO token_usage "
+                    "(session_id, model, tier, operation, input_tokens, output_tokens, "
+                    "total_tokens, cost_estimate, source, task_complexity) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session,
+                        _model,
+                        _tier_for_model(_model),
+                        "interactive",
+                        _acc["input"] + _acc["cache_creation"] + _acc["cache_read"],
+                        _acc["output"],
+                        _model_total,
+                        round(_cost, 6),
+                        "claude_code_transcript",
+                        None,
+                    ),
+                )
+            _tconn.execute(
+                "UPDATE sessions SET total_tokens=? WHERE session_id=?",
+                (_grand_total, session),
+            )
+            _tconn.commit()
+            _tconn.close()
+            print(f"[DQIII8] transcript cost capture: {_grand_total} tokens across {len(_per_model)} model(s)")
+except Exception as e:
+    _log.warning("transcript cost capture failed", exc_info=True)
 
 # ── 1b. Reconcile error_log with agent_actions ────────────────────
 try:
@@ -537,7 +676,6 @@ try:
             capture_output=True,
             timeout=10,
         )
-        # Only commit if there are staged changes
         status = subprocess.run(
             ["git", "-C", str(JARVIS), "status", "--porcelain"],
             capture_output=True,
@@ -608,7 +746,6 @@ try:
             )
             _already_committed_today = bool(_log_today.stdout.strip())
 
-            # Collect modified files via git diff
             _diff = subprocess.run(
                 ["git", "-C", str(JARVIS), "diff", "--stat", "HEAD"],
                 capture_output=True,
@@ -621,10 +758,8 @@ try:
                 if "|" in l and not l.strip().startswith("Bin")
             ]
 
-            # Determine active project
-            _project = os.environ.get("DQIII8_PROJECT", "dqiii8-core")
+            _project = _resolve_project()
 
-            # Next step from project file
             _next = "Ver projects/{}.md".format(_project)
             _pm = JARVIS / "projects" / f"{_project}.md"
             if _pm.exists():
@@ -638,7 +773,6 @@ try:
                                 break
                         break
 
-            # Write session handover file
             _sessions_dir = JARVIS / "sessions"
             _sessions_dir.mkdir(exist_ok=True)
             _date = NOW[:10]
@@ -656,7 +790,7 @@ try:
 date: {_date}
 time: {NOW[11:16]}
 project: {_project}
-agent_used: claude-sonnet-4-6
+agent_used: claude-sonnet-5
 session_id: {session[:8]}
 duration: {_duration_str}
 ---
@@ -678,7 +812,14 @@ duration: {_duration_str}
 """
             _session_path.write_text(_session_md, encoding="utf-8")
 
-            # Git add + commit + push (maximum 1 handover commit per day)
+            # Stage sessions/ explicitly, never ".": `_pm` points at
+            # JARVIS/"projects"/<project>.md, a directory that does not exist (real
+            # docs live at my-projects/<slug>/PROJECT.md), so `_pm.exists()` is
+            # always False. A "." fallback here stages the ENTIRE working tree —
+            # including uncommitted in-progress work — into an unreviewed
+            # auto-commit that the push below would publish. sessions/ is
+            # gitignored by design (handover notes are local-only, see
+            # .claude/skills/handover/SKILL.md).
             subprocess.run(
                 [
                     "git",
@@ -686,7 +827,6 @@ duration: {_duration_str}
                     str(JARVIS),
                     "add",
                     str(_sessions_dir),
-                    str(_pm) if _pm.exists() else ".",
                 ],
                 capture_output=True,
                 timeout=10,
@@ -710,34 +850,6 @@ duration: {_duration_str}
                     capture_output=True,
                     timeout=20,
                 )
-
-            # === GEMINI REVIEW ===
-            try:
-                _review_check = subprocess.run(
-                    [
-                        "python3",
-                        str(JARVIS / "bin" / "gemini_review.py"),
-                        "--check-only",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-                if (
-                    "0 files" not in _review_check.stdout
-                    and _review_check.returncode == 0
-                ):
-                    _log = JARVIS / "database" / "audit_reports" / "gemini_last.log"
-                    subprocess.Popen(
-                        ["python3", str(JARVIS / "bin" / "gemini_review.py")],
-                        stdout=open(str(_log), "w", encoding="utf-8"),
-                        stderr=subprocess.STDOUT,
-                    )
-                    print(
-                        "[DQIII8] Gemini review started in background — report ready in ~5min"
-                    )
-            except Exception as _ge:
-                print(f"[DQIII8] Gemini review skip: {_ge}")
 
 except Exception as e:
     _log.warning("handover failed", exc_info=True)

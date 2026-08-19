@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 JARVIS = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
+DB_PATH = JARVIS / "database" / "dqiii8_knowledge.db"
 for _d in [
     JARVIS / "bin" / s for s in ["", "core", "agents", "monitoring", "tools", "ui"]
 ]:
@@ -478,6 +479,69 @@ async def recent_tasks(limit: int = 50, auth: bool = Depends(check_auth)):
     ]
 
 
+@app.get("/api/production")
+async def production_metrics(auth: bool = Depends(check_auth)):
+    """Per-project agent-compute and human-hours metrics for the Produccion tab."""
+    _my_projects = JARVIS / "my-projects"
+    known_projects = (
+        {p.name for p in _my_projects.iterdir() if p.is_dir()}
+        if _my_projects.is_dir()
+        else set()
+    )
+
+    with get_db() as conn:
+        agent_rows = conn.execute(
+            """
+            SELECT project,
+                   COUNT(*) as actions,
+                   SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) as duration_covered,
+                   ROUND(SUM(estimated_cost_usd), 6) as cost_usd,
+                   ROUND(AVG(success) * 100, 1) as success_rate
+            FROM agent_actions
+            WHERE project IS NOT NULL
+            GROUP BY project
+            """
+        ).fetchall()
+
+        human_rows = conn.execute(
+            """
+            SELECT project,
+                   SUM((julianday(COALESCE(ended_at, 'now')) - julianday(started_at)) * 1440) as minutes
+            FROM human_hours
+            GROUP BY project
+            """
+        ).fetchall()
+
+    projects: dict = {}
+    unrecognized_agent: list = []
+    unrecognized_human: list = []
+
+    for row in agent_rows:
+        name = row[0]
+        actions = row[1]
+        covered_pct = round((row[2] / actions) * 100, 1) if actions else 0.0
+        if name not in known_projects:
+            unrecognized_agent.append(name)
+        projects.setdefault(name, {})["agent"] = {
+            "actions": actions,
+            "duration_ms_covered_pct": covered_pct,
+            "cost_usd": row[3] or 0.0,
+            "success_rate": row[4] or 0.0,
+        }
+
+    for row in human_rows:
+        name, minutes = row[0], row[1] or 0.0
+        if name not in known_projects:
+            unrecognized_human.append(name)
+        projects.setdefault(name, {})["human"] = {"minutes": round(minutes, 1)}
+
+    return {
+        "projects": projects,
+        "unrecognized_human_projects": unrecognized_human,
+        "unrecognized_agent_projects": unrecognized_agent,
+    }
+
+
 @app.post("/api/amplify")
 async def amplify_intent(request: Request, auth: bool = Depends(check_auth)):
     """Real-time prompt analysis preview. Returns analysis without executing."""
@@ -774,7 +838,7 @@ async def chat_stream(request: Request, auth: bool = Depends(check_auth)):
 
 def _persist_chat(session_id: str, user_msg: str, assistant_msg: str) -> None:
     """Write chat turn to DB. Creates tables if missing (graceful on older schemas)."""
-    db = JARVIS / "database" / "dqiii8.db"
+    db = DB_PATH
     if not db.exists():
         return
     try:
@@ -812,7 +876,7 @@ def _persist_chat(session_id: str, user_msg: str, assistant_msg: str) -> None:
 @app.get("/api/chat/history")
 async def chat_history(limit: int = 10, auth: bool = Depends(check_auth)):
     """Return last N sessions with first user message as preview."""
-    db = JARVIS / "database" / "dqiii8.db"
+    db = DB_PATH
     if not db.exists():
         return []
     try:
@@ -885,7 +949,7 @@ async def search_chat(q: str = "", limit: int = 20, auth: bool = Depends(check_a
     """Search chat sessions by content. Returns sessions matching the query."""
     if not q.strip():
         return []
-    db = JARVIS / "database" / "dqiii8.db"
+    db = DB_PATH
     if not db.exists():
         return []
     try:
@@ -915,7 +979,7 @@ async def search_chat(q: str = "", limit: int = 20, auth: bool = Depends(check_a
 @app.post("/api/chat/{session_id}/delete")
 async def delete_chat_session(session_id: str, auth: bool = Depends(check_auth)):
     """Delete a chat session and its messages."""
-    db = JARVIS / "database" / "dqiii8.db"
+    db = DB_PATH
     if not db.exists():
         return {"ok": False, "error": "DB not found"}
     try:
@@ -932,7 +996,7 @@ async def delete_chat_session(session_id: str, auth: bool = Depends(check_auth))
 @app.get("/api/chat/{session_id}/messages")
 async def chat_session_messages(session_id: str, auth: bool = Depends(check_auth)):
     """Return all messages for a given session."""
-    db = JARVIS / "database" / "dqiii8.db"
+    db = DB_PATH
     if not db.exists():
         return []
     try:
@@ -1026,7 +1090,7 @@ async def get_tiers(auth: bool = Depends(check_auth)):
                 and not has_anthropic
                 and "$0 (Pro plan)"
                 or "$3/Mtok",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "method": (
                     oauth["method"]
                     if oauth["available"]

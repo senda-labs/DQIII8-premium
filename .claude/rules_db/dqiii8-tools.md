@@ -1,31 +1,26 @@
-# DQIII8 — Internal Tools Reference
+# Tool Lanes — claude / cc / dispatch (DQIII8)
 
-## CLI tools (direct invocation)
-| Script | Purpose | Trigger |
-|--------|---------|---------|
-| `bin/tools/gemini_export.py` | Export module for Gemini review | `/gemini_export [module]` |
-| `bin/tools/gemini_review.py` | Register Gemini feedback in DB | Post-review |
-| `bin/tools/github_researcher.py` | Search relevant GitHub repos | `/github_research [topic]` |
-| `bin/tools/orphan_finder.py` | Detect unreferenced scripts | `python3 bin/tools/orphan_finder.py` |
-| `bin/core/validate_env.py` | Verify .env keys at startup | Called by `bin/j.sh` |
+Referenced by `rules_dispatcher.py` alias `tools` (injected when a Bash command
+mentions `claude` or `cc`).
 
-## Knowledge system
-Agents with knowledge base: `finance-analyst`, `python-specialist`
-```bash
-python3 bin/agents/knowledge_search.py --agent python-specialist "async patterns"
-```
-Knowledge: `.claude/agents/{agent}/knowledge/*.md` + `index.json`
+## One lane per job
+- **Interactive orchestration** → this CC session (Sonnet). Delegate with the Agent tool or
+  `claude -p`. The `openrouter_wrapper.py` NIM/Groq lane is **dormant — do not invoke it**
+  (REGLA NIM, `.claude/rules/00_core_behavior.md`); routing SSOT is
+  `.claude/rules/03_tiering_and_routing.md`, history in
+  `.claude/rules_db/archive/multi-tier-dormant-2026-08.md`.
+- **Fire-and-forget agent task** → `/dispatch-agent` skill. Both sync and async
+  usable (see dqiii8-error-prevention.md §Dispatch).
+- **Long batch jobs** (intl-reports generate, stress tests) → external tmux, never
+  inline in the session. `claude -p` non-interactive cannot spawn subagents (the Agent tool
+  exists only in interactive CC sessions) — so a batch job must be shaped as one linear task,
+  not as an orchestrator that fans out. Its historical fallback to `AGENT_ROUTING` is dormant
+  with the rest of the wrapper (scope note archived in
+  `.claude/rules_db/archive/multi-tier-dormant-2026-08.md`).
+- **Web content** → `mcp__fetch` first ($0), firecrawl CLI on failure
+  (web-research-tools.md). CDP investigation → `/cdp-investigate` skill, port 9333,
+  read-only, verify tunnel with curl before assuming up.
 
-## GitHub Research
-```bash
-python3 bin/github_researcher.py "[topic]" --min-stars 100 --max-repos 15
-```
-Output: `tasks/github_reports/`. Without GITHUB_TOKEN → 60 req/h.
-
-## Telegram
-```python
-from bin.core.notify import send_telegram; send_telegram("msg")
-from bin.core.notify import send_document; send_document(path, caption="…")
-```
-Commands: `/cc <prompt>`, `/cc_status`, `/auth_status`
-Auth: OAuth via `~/.claude/.credentials.json`. Bot: `bin/ui/dqiii8_bot.py`
+## claude CLI safety
+- `claude -p` runs headless: hook failures degrade to APPROVE; do not rely on
+  interactive ESCALATE prompts existing there.

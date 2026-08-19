@@ -47,6 +47,10 @@ TASK_AGENT_MAP: dict[str, str] = {
     "mixed": "orchestrator",
 }
 
+# Legacy numeric shorthand (1/2/3) for the canonical cost taxonomy, NOT a separate
+# tier vocabulary (audit gap 9, 2026-08-17): 1 ≈ Tier C (Ollama local), 2 ≈ Tier B
+# (Groq), 3 ≈ Tier A (Sonnet). Canonical table: .claude/rules/03_tiering_and_routing.md.
+# Values/logic frozen — changing them requires updating KEYWORD_TASK_TYPE too.
 TASK_TIER_MAP: dict[str, int] = {
     "code": 1,
     "pipeline": 1,
@@ -203,12 +207,12 @@ def _get_model_for_task(task_type: str) -> tuple[str, float]:
             "code": "qwen2.5-coder:7b",
             "pipeline": "qwen2.5-coder:7b",
             "research": "llama-3.3-70b-versatile",
-            "analysis": "claude-sonnet-4-6",
-            "trading": "claude-sonnet-4-6",
-            "writing": "claude-sonnet-4-6",
-            "mixed": "claude-sonnet-4-6",
+            "analysis": "claude-sonnet-5",
+            "trading": "claude-sonnet-5",
+            "writing": "claude-sonnet-5",
+            "mixed": "claude-sonnet-5",
         }
-        return _defaults.get(task_type, "claude-sonnet-4-6"), 0.5
+        return _defaults.get(task_type, "claude-sonnet-5"), 0.5
 
 
 # ── LLM call via openrouter_wrapper ──────────────────────────────────────────

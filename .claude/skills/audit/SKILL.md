@@ -21,6 +21,20 @@ Triggers the **auditor** agent to analyze `database/dqiii8.db` and produce a str
 /audit --agent python-specialist   # scope to one agent
 ```
 
+## Scope note — `sessions` / `morning_report` / `loop_effectiveness`
+
+`.claude/hooks/stop.py:439` writes `sessions` from every CLI session
+(`INSERT ... ON CONFLICT(session_id) DO UPDATE`), gated on
+`_total_actions > 0` (`stop.py:436`). So `sessions` is only populated when
+`agent_actions` has ≥1 row for that session, which makes a near-empty
+`sessions` table a **second, independent detector for an `agent_actions`
+outage** — a real signal to chase, not noise to dismiss. Only `morning_report`
+is genuinely bot-only (written solely by `bin/ui/dqiii8_bot.py`).
+
+`loop_effectiveness` is a VIEW over `objectives`, which has 0 rows because the
+autonomous-loop execution flow (`bin/director.py` loop mode) isn't in active
+use yet — an empty result there is still expected, not a symptom to chase.
+
 ## What it does
 
 1. Queries all metric tables: `agent_actions`, `error_log`, `sessions`, `skill_metrics`
@@ -52,4 +66,4 @@ The `stop.py` hook automatically triggers `/audit` when 7+ days have passed sinc
 ## Agent
 
 Handled by: `.claude/agents/auditor.md`
-Model: `claude-sonnet-4-6`
+Model: `claude-sonnet-5`

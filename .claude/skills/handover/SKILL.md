@@ -1,6 +1,6 @@
 ---
 name: handover
-description: Generate a session handover note at the end of a work session. Saves to sessions/, updates project status, commits and pushes. Auto-invoked after long sessions (50+ turns).
+description: Generate a session handover note at the end of a work session. The manual /handover path saves to sessions/ locally only, never committing or pushing — stop.py's separate automatic path does commit and push (see §Two implementations). Suggested after long sessions (50+ turns).
 command: /handover
 allowed-tools: [Bash, AskUserQuestion, Edit]
 user-invocable: true
@@ -52,7 +52,11 @@ cd /root/dqiii8
 python3 bin/tools/handover.py
 ```
 
-The script generates `sessions/YYYY-MM-DD_session_N.md`, commits, and pushes.
+El script añade automáticamente una sección `## Operador` derivada del
+usuario Linux real (`plglobal-isabel` → Isabel Vinagre, `plglobal-mario` →
+Mario Cabeza, `root` → Iker) — no requiere preguntar quién opera la sesión.
+
+The script generates `sessions/YYYY-MM-DD_session_N.md` locally. `sessions/` is gitignored — a file written by *this* path is never committed or pushed.
 
 ### Step 4 — Inject real next steps
 
@@ -75,25 +79,35 @@ steps collected in Step 2. Format each step as a bullet:
 Do NOT invent steps. Only write what the user confirmed or what was clearly
 inferred from system state.
 
-### Step 5 — Commit the enriched file
-
-```bash
-cd /root/dqiii8
-git add sessions/
-git commit -m "docs: add real next steps to handover $(date +%Y-%m-%d)"
-git push origin main
-```
-
-### Step 6 — Confirm
+### Step 5 — Confirm
 
 Output:
 ```
-[HANDOVER] Saved · sessions/YYYY-MM-DD_session_N.md
+[HANDOVER] Saved locally · sessions/YYYY-MM-DD_session_N.md
 Next steps: [N items]
 ```
 
+## Two implementations (read before claiming "no push")
+
+The handover feature exists **twice**, with different triggers, filenames and git behaviour.
+Nothing else in the corpus may state one and imply the other.
+
+| | Manual — this skill | Automatic — `.claude/hooks/stop.py` §3 |
+|---|---|---|
+| Trigger | user types `/handover`; suggested after ~50 turns | session ≥15 min old (`_duration_min >= 15`, measured from the first `agent_actions` row), on every `Stop`/`SubagentStop` |
+| Writer | `bin/tools/handover.py` (no git code at all) | inline in the hook |
+| Filename | `sessions/YYYY-MM-DD_session_N.md` (N from 1) | `sessions/YYYY-MM-DD_session.md`, then `_2`, `_3`, … |
+| Asks first | yes (`AskUserQuestion`) | no |
+| Git | none — local-only artifact | `git add sessions/` → `git commit -m "session handover {date}"` → `git push origin master`, capped at one per calendar day |
+
+Independently of the handover block, `stop.py` §2 auto-commits `tasks/lessons.md` and
+`projects/*.md`, and §2b then runs an **unconditional, ungated `git push origin master` on
+every session and subagent close**. So "the handover note is never pushed" describes the
+manual path only; the hook layer pushes regardless of which path ran.
+SSOT for the automatic behaviour is `stop.py`; see `.claude/rules/02_hooks_and_permissions.md`.
+
 ## Notes
 - NEVER invent next steps that weren't verified in system state or confirmed by user
-- If git push fails (network/auth), the .md file is saved locally — does not block
+- `sessions/` is gitignored, so a note written by *this* skill is never committed or pushed — a local-only artifact (the hook's `git add sessions/` is a no-op for the same reason; its commit/push carries whatever §2 staged)
 - Never include sensitive information (API keys, passwords) in the handover
-- Variable `DQIII8_PROJECT` controls the active project (default: `dqiii8-core`)
+- The active project is resolved via `bin/core/project_context.py::resolve_project()` (DB-backed SSOT, default: `dqiii8-core`) — not an env var

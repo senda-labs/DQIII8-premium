@@ -1,6 +1,8 @@
 ---
 name: code-reviewer
-model: openrouter/openai/gpt-oss-120b:free
+model: claude-opus-5
+# Tier S. Coincide con AGENT_ROUTING["code-reviewer"] = ("anthropic", "claude-opus-5").
+# Ver .claude/rules_db/common/agents.md.
 isolation: worktree
 tools: ["Read", "Grep", "Glob"]
 ---

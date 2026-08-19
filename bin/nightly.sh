@@ -81,13 +81,32 @@ python3 "$DQIII8_ROOT/bin/monitoring/telemetry.py" --send 2>&1 || echo "  Teleme
 echo ""
 
 # ── 8. Git commit (no push) ──
+# `|| true` (Opus red-team review, 2026-08-13, P2-4): a pre-commit hook
+# rejecting the commit (e.g. validate_hooks_config.py tripping on a
+# relocated out-of-repo path) must not `set -e`-abort the rest of this
+# script — stages 9-12 (paper harvest, working-memory cleanup, prune, smoke
+# tests) would silently stop running with the watchdog still reporting OK,
+# since it only checks this report file's mtime, not its content.
 echo "## 8. Git status"
-git add -A
+# Explicit pathspec, not `git add -A` (Opus red-team review, 2026-08-13,
+# round 2 P1-2): -A stages anything untracked anywhere in the tree, and this
+# repo has a documented history of untracked DB/log artifacts landing near
+# the root (e.g. dqiii8_history.db.pre-fix-* snapshots) — one unignored
+# artifact away from a 32MB DB commit to a public repo. Nightly's own scope
+# is docs/.claude/knowledge churn, so scope the add to match.
+# `tasks/` dropped and `|| true` added (Opus red-team review, 2026-08-13,
+# round 3 P1-1): tasks/ is entirely .gitignore'd with zero tracked files —
+# `git add -A -- ... tasks/ ...` resolves to an all-ignored pathspec, which
+# `git add` treats as an error (exit 1), which `set -e` (line 6) turned into
+# an abort of stages 9-12 every night since this line landed — reproduced
+# live, first real cron failure would have been 2026-08-14 03:05.
+git add -A -- docs/ .claude/ knowledge/ || true
 if git diff --cached --quiet; then
     echo "  No changes to commit"
-else
-    git commit -m "chore: nightly maintenance — $(date -u '+%Y-%m-%d')" 2>&1
+elif git commit -m "chore: nightly maintenance — $(date -u '+%Y-%m-%d')" 2>&1; then
     echo "  ✓ Changes committed (push pending)"
+else
+    echo "  ✗ Commit failed (pre-commit hook rejected it) — continuing remaining stages"
 fi
 echo ""
 
@@ -95,7 +114,7 @@ REPORT="${DQIII8_ROOT}/tasks/nightly-report.md"
 
 # ── 9. Paper harvester ──
 echo "## 9. Paper Harvest"
-python3 "$DQIII8_ROOT/bin/tools/paper_harvester.py" --all 2>&1 || echo "  Paper harvest failed"
+python3 "$DQIII8_ROOT/bin/paper_harvester.py" --all 2>&1 || echo "  Paper harvest failed"
 echo ""
 
 # ── 10. Working memory cleanup ──
@@ -105,7 +124,7 @@ echo ""
 
 # ── 11. Prune outdated papers ──
 echo "## 11. Prune Outdated Papers"
-python3 "$DQIII8_ROOT/bin/tools/paper_harvester.py" --prune --prune-days 180 2>&1 || echo "  Prune failed"
+python3 "$DQIII8_ROOT/bin/paper_harvester.py" --prune --prune-days 180 2>&1 || echo "  Prune failed"
 echo ""
 
 # ── 12. Smoke tests ──

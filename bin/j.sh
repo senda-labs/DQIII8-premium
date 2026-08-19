@@ -19,6 +19,12 @@
 set -euo pipefail
 
 DQIII8_ROOT="${DQIII8_ROOT:-/root/dqiii8}"
+# Claude Code resolves .claude/settings.json from the session cwd's git root, so
+# every `claude` launch below runs from DQIII8_ROOT (keeping the telemetry hooks
+# registered) and exposes the caller's directory via --add-dir instead.
+# `pwd` fails (and, under `set -e`, aborts the whole script) when the caller's
+# directory has been deleted out from under the shell, so fall back to the root.
+_DQ_PWD="$(pwd 2>/dev/null || echo "$DQIII8_ROOT")"
 OR_WRAPPER="$DQIII8_ROOT/bin/core/openrouter_wrapper.py"
 MODEL_SONNET="claude-sonnet-4-6"
 OLLAMA_FALLBACK="qwen/qwen3-235b-a22b:free"
@@ -113,7 +119,7 @@ _wrap() {
 # ── Early flags — run before full env check ──────────────────────────────────
 case "${1:-}" in
     --voice-test)
-        exec python3 "$DQIII8_ROOT/bin/voice_handler.py" --test
+        exec python3 "$DQIII8_ROOT/bin/tools/voice_handler.py" --test
         ;;
     --setup)
         shift
@@ -264,11 +270,11 @@ Be specific and use the actual data."
             ;;
         --harvest)
             shift
-            exec python3 "$DQIII8_ROOT/bin/tools/paper_harvester.py" "$@"
+            exec python3 "$DQIII8_ROOT/bin/paper_harvester.py" "$@"
             ;;
         --upload|-u)
             shift
-            exec python3 "$DQIII8_ROOT/bin/agents/knowledge_upload.py" "$@"
+            exec python3 "$DQIII8_ROOT/bin/knowledge_upload.py" "$@"
             ;;
         --dashboard)
             shift
@@ -313,7 +319,7 @@ case "$MODEL" in
     local|ollama)
         _log "Tier 1 — Ollama $OLLAMA_MODEL | Cost: \$0"
         if ollama_available; then
-            exec claude --model "ollama:$OLLAMA_MODEL" "$@"
+            cd "$DQIII8_ROOT" && exec claude --model "ollama:$OLLAMA_MODEL" --add-dir "$_DQ_PWD" "$@"
         else
             _log "Ollama unavailable → fallback openrouter/$OLLAMA_FALLBACK"
             _wrap --model "$OLLAMA_FALLBACK" "$@"
@@ -342,7 +348,7 @@ case "$MODEL" in
         elif [[ "$_dq_default" == "ollama-only" ]]; then
             _log "DQ_DEFAULT_TIER=$_dq_default → Tier 1 (Ollama, local)"
             if ollama_available; then
-                exec claude --model "ollama:$OLLAMA_MODEL" "$@"
+                cd "$DQIII8_ROOT" && exec claude --model "ollama:$OLLAMA_MODEL" --add-dir "$_DQ_PWD" "$@"
             else
                 _log "Ollama unavailable → fallback openrouter/$OLLAMA_FALLBACK"
                 _wrap --model "$OLLAMA_FALLBACK" "$@"

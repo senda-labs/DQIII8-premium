@@ -16,8 +16,9 @@ from pathlib import Path
 
 import pytest
 
-JARVIS = Path("/root/dqiii8")
+JARVIS = Path(__file__).parent.parent  # Current worktree or repo root
 HOOKS = JARVIS / ".claude" / "hooks"
+SCHEMA_V2_SQL = (JARVIS / "database" / "schema_v2.sql").read_text(encoding="utf-8")
 
 
 def test_precompact_exits_zero_and_outputs_empty_json():
@@ -54,7 +55,7 @@ def test_cost_tier_classification():
     assert fn("qwen2.5-coder:7b") == 1, "qwen2.5-coder must be tier 1 (local)"
     assert fn("groq:llama-3.3-70b-versatile") == 2, "groq must be tier 2 (cloud-free)"
     assert fn("claude-haiku-4-5") == 2, "haiku is tier 2 (mapped via haiku keyword)"
-    assert fn("claude-sonnet-4-6") == 3, "sonnet must be tier 3 (paid)"
+    assert fn("claude-sonnet-5") == 3, "sonnet must be tier 3 (paid)"
     assert fn("claude-opus-4-6") == 3, "opus must be tier 3 (paid)"
     assert fn("unknown-model") == 0, "unknown model must return tier 0"
 
@@ -190,3 +191,52 @@ def test_claims_conflict_detected():
     assert len(conflicts) == 1, f"Expected 1 conflicted resource, got {len(conflicts)}"
     assert conflicts[0][0] == "scene_director.py"
     assert conflicts[0][1] == 2
+
+
+def test_pre_tool_use_resolves_project_from_cwd(tmp_path):
+    """When stdin cwd is under my-projects/<name>/, agent_actions.project is set.
+
+    Builds the tmp DB from the real schema_v2.sql SSOT rather than a hand-listed
+    column subset — a hand-listed subset previously drifted behind real schema
+    additions (e.g. the `worktree` column pre_tool_use.py's INSERT already
+    writes), so the fixture silently exercised a schema pre_tool_use.py never
+    actually sees in production and the INSERT it performs there failed loudly.
+    """
+    db_path = tmp_path / "database" / "dqiii8.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(SCHEMA_V2_SQL)
+    conn.commit()
+    conn.close()
+
+    # known_projects() validates the resolved slug against DQIII8_ROOT/my-projects/
+    # (real DQIII8_ROOT has this; the isolated tmp DQIII8_ROOT below needs its own
+    # copy or "intl-reports" fails validation and silently falls back to CORE_PROJECT).
+    (tmp_path / "my-projects" / "intl-reports").mkdir(parents=True)
+
+    cwd = "/root/dqiii8/my-projects/intl-reports/scripts"
+    payload = json.dumps(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "session_id": "test-cwd-01",
+            "agent_id": "test-agent",
+            "cwd": cwd,
+        }
+    )
+    result = subprocess.run(
+        [sys.executable, str(HOOKS / "pre_tool_use.py")],
+        input=payload,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env={**os.environ, "DQIII8_ROOT": str(tmp_path)},
+    )
+    assert result.returncode == 0
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT project FROM agent_actions WHERE session_id = 'test-cwd-01'"
+    ).fetchone()
+    conn.close()
+    assert row is not None
+    assert row[0] == "intl-reports"

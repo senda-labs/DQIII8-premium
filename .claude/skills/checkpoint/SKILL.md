@@ -31,8 +31,10 @@ When `create [name]` is called:
    git add -p   # stage only intended changes
    git commit -m "checkpoint: [name]"
    ```
-3. Append to `.claude/checkpoints.log`:
+3. Append to `.claude/checkpoints.log` (create it first if absent, otherwise
+   `verify`/`list` fail on a fresh install):
    ```bash
+   [ -f .claude/checkpoints.log ] || touch .claude/checkpoints.log
    echo "$(date +%Y-%m-%d-%H:%M) | [name] | $(git rev-parse --short HEAD)" >> .claude/checkpoints.log
    ```
 4. Report: `CHECKPOINT CREATED: [name] @ [hash]`
@@ -42,6 +44,9 @@ When `create [name]` is called:
 When `verify [name]` is called:
 
 1. Read the checkpoint hash from `.claude/checkpoints.log`
+   ```bash
+   [ -f .claude/checkpoints.log ] || touch .claude/checkpoints.log
+   ```
 2. Compare current state:
    ```bash
    git diff [hash]..HEAD --stat
@@ -60,7 +65,8 @@ When `verify [name]` is called:
 ## List Checkpoints
 
 ```bash
-cat .claude/checkpoints.log | tail -20
+[ -f .claude/checkpoints.log ] || touch .claude/checkpoints.log
+tail -20 .claude/checkpoints.log
 ```
 
 ## Typical Workflow
@@ -83,4 +89,4 @@ cat .claude/checkpoints.log | tail -20
 
 - Checkpoints are git commits — they survive context compaction
 - Use before risky multi-file changes (P2, P3 batches)
-- Combine with `strategic-compact`: compact AFTER creating checkpoint
+- If you compact the context afterwards, create the checkpoint first

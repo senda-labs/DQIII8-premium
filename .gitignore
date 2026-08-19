@@ -36,9 +36,34 @@ database/*.db
 database/*.db-wal
 database/*.db-shm
 
-# Benchmark results and incremental migrations (use schema_v2.sql for fresh installs)
+# Backup/dump chain — wholesale, not a narrow pattern (plaintext SQL dumps of the
+# production DB live here and don't match any *.db* pattern above)
+database/backups/
+database/dqiii8.db.bak-*
+# Ad-hoc pre-fix snapshots (e.g. dqiii8_history.db.pre-fix-<timestamp>) don't
+# end in .db so *.db/database/*.db above miss them — real gap found live
+# 2026-08-13 (Opus red-team review, round 2 P1-2): a 32MB untracked snapshot
+# of this file sat unignored, one `git add -A` away from landing in a public
+# repo with two prior secret-leak incidents.
+database/*.db.pre-fix-*
+database/*_history.db*
+
+# Astro artifact of unknown provenance — no astro.config/package.json anywhere
+# references it; gitignored rather than committed blind
+.astro/
+
+# Benchmark results (use schema_v2.sql for fresh installs)
 database/benchmarks/*.json
-database/migrations/*.sql
+
+# database/migrations/*.sql WAS gitignored here — reverted 2026-08-13 (Opus
+# red-team review P1): schema_v2.sql is the fresh-install SSOT, but a changed
+# VIEW needs a migration to actually apply to an existing DB (CREATE VIEW IF
+# NOT EXISTS no-ops otherwise, see 01_database_mutations.md P3-9) — an
+# ignored migrations/ dir made every such fix uncommittable and untracked.
+
+# Plaintext SQL dumps of the production DB (e.g. database/legacy/*.sql) can
+# contain secrets/PII from agent_actions rows — never commit them un-audited.
+database/legacy/*.sql
 
 # Config with real keys (example file IS committed, real file is NOT)
 config/.env
@@ -164,11 +189,14 @@ sessions/
 projects/
 tasks/
 decisions/
-database/audit_reports/
+database/audit_reports/*
 database/qdrant/
 
 # Red-team / Opus adversarial review reports, panel reviews, disaster-test
 # reports — private, may reference real infra/credentials/findings.
+# Root cause of F-26 (2026-08-17): docs/audits/*.md was NOT gitignored,
+# so a stress-test report with a raw VPS IP + DB credentials landed in
+# public history. Never again: this whole category is private by default.
 docs/audits/
 
 # Internal implementation plans (private roadmaps/scope, may reference
@@ -267,3 +295,12 @@ secrets_to_purge.txt
 
 # Gitleaks runtime state (keep local)
 .stfolder
+
+# === Client/vendor material — intentionally untracked (never publish) ===
+# Confirmed 2026-08-12: NOT previously gitignored, so nightly.sh's unattended
+# `git add -A && git commit` would have staged all of this into the public
+# senda-labs/DQIII8 repo at its next scheduled run (03:05 UTC).
+assets/branding/
+docs/plglobal/
+ops/plglobal/
+docs/reference/fable5-world-demo/

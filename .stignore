@@ -31,3 +31,17 @@ desktop.ini
 *.log
 database/*.db
 database/legacy/*.db
+
+// Secrets — NEVER sync to Windows
+.secrets/
+*.asc
+*.pem
+**/.gnupg/
+**/rclone.conf
+// .env variants: .env, .env.dev, .env.bak.*, .env.local, etc.
+.env
+.env.*
+**/.env
+**/.env.*
+*.env
+*.env.*

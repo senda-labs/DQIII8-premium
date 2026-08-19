@@ -2,26 +2,48 @@
 DQIII8 — Rules Dispatcher (RAG de Reglas Dinámico)
 Inyecta SÓLO las reglas relevantes al contexto del tool en curso.
 
-En lugar de cargar los 16 archivos en cada turno (~4k tokens), este módulo
-mapea tool + input → subconjunto mínimo de reglas (~200-800 tokens).
+En lugar de cargar el corpus de reglas entero en cada turno, este módulo mapea
+tool + input → subconjunto mínimo de reglas (~1060–8004 tokens, cl100k_base real).
+El número de archivos del registro no se cita aquí: el recuento vivo es
+`len(_REGISTRY)` y su parte de rules_db/ está fijada en CLAUDE.md
+("Contextual rules (N)"), validada por check_claude_md_counts().
 
-Las reglas residen en .claude/rules_db/ (fuera del auto-inject de Claude Code).
-El único archivo en .claude/rules/ es el DYNAMIC.md de 3 líneas.
+RANGO CANÓNICO (medido con token_estimate(), cl100k_base real vía tiktoken):
+**suelo 1060** (solo _ALWAYS = ops + core-behavior), **techo 8004**.
+**suelo de sesión 2790** = ese suelo + CLAUDE.md + DYNAMIC.md, los dos ficheros que
+Claude Code auto-inyecta en toda sesión; es el impuesto de contexto real por sesión.
+
+El techo es el MÁXIMO REALMENTE ALCANZABLE, no el peor caso de la matriz
+representativa: un Bash que combina todas las keywords de _BASH_KEYWORD_RULES
+en un mismo comando. La otra rama alta es Edit sobre .claude/hooks/**.py, por
+debajo de ese techo. Publicar el peor caso de la matriz deja fuera ambas.
+
+RE-MEDIR OBLIGATORIAMENTE siempre que cambie de tamaño 00_core_behavior.md,
+dqiii8-ops.md, o cualquier fichero de rules_db/ o rules/ que esté en _ALWAYS o
+en un trigger, y siempre que se añada/quite un trigger. Solo 2 sitios citan el
+rango y deben actualizarse juntos: este docstring y .claude/rules/DYNAMIC.md.
+02_hooks_and_permissions.md NO debe citar los números — apunta aquí
+(invariante verificada por bin/tools/validate_rules_registry.py, que además
+mide el suelo y los techos reales en cada commit).
+
+Las reglas contextuales residen en .claude/rules_db/, fuera del auto-inject de
+Claude Code: este dispatcher las carga bajo demanda. El único fichero de reglas
+que Claude Code auto-inyecta en el contexto de sesión es .claude/rules/DYNAMIC.md;
+el resto de .claude/rules/*.md se inyecta también bajo demanda por este dispatcher.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Sequence
 
 RULES_DB = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8")) / ".claude" / "rules_db"
-# Rules split: deterministic modules live in .claude/rules/ (../rules/ from RULES_DB)
-# Legacy contextual rules remain in .claude/rules_db/
 
 # ── Rule file registry ────────────────────────────────────────────────────────
-# Paths are relative to RULES_DB. Use "../rules/" for the new deterministic modules.
+# Paths are relative to RULES_DB; "../rules/" reaches the deterministic modules.
 _REGISTRY: dict[str, str] = {
     # ── Deterministic modules (new rule engine split) ─────────────────────────
     "core-behavior":  "../rules/00_core_behavior.md",
@@ -31,28 +53,24 @@ _REGISTRY: dict[str, str] = {
     # ── Legacy contextual rules (rules_db/) ───────────────────────────────────
     "git-safety":     "git-safety.md",
     "python":         "python.md",
-    "routing":        "routing.md",
     "ops":            "dqiii8-ops.md",
     "prevention":     "dqiii8-error-prevention.md",
-    "deliverables":   "dqiii8-deliverables.md",
     "tools":          "dqiii8-tools.md",
     "plan-gate":      "dqiii8-plan-gate.md",
-    "context-window": "dqiii8-context-window.md",
     "workspace":      "workspace.md",
     "intl-reports":   "intl-reports-ops.md",
+    "web-tools":      "web-research-tools.md",
     "agents":         "common/agents.md",
     "quality":        "common/quality.md",
-    "git-workflow":   "common/git-workflow.md",
-    "workflow":       "common/workflow.md",
-    "testing":        "common/testing.md",
-    "performance":    "common/performance.md",
+    # La taxonomía de tiers canónica es C/B/B+/B++/A/S y vive en
+    # ../rules/03_tiering_and_routing.md (alias "tiering"). No redefinir tiers aquí.
 }
 
-# ── ALWAYS injected (minimal ops guard, <300 tokens combined) ────────────────
-_ALWAYS: tuple[str, ...] = ("ops",)   # prohibitions + autonomy rules
+# ── ALWAYS injected (ops guard + core behavior) ──────────────────────────────
+# Estos dos ficheros son el suelo de tokens declarado en el docstring.
+_ALWAYS: tuple[str, ...] = ("ops", "core-behavior")  # prohibitions + autonomy + zero-complacency/cost-first
 
 # ── Tool → rules mapping ─────────────────────────────────────────────────────
-# Each entry is a list of rule aliases to inject.
 # Bash rules additionally filtered by command keyword below.
 _TOOL_RULES: dict[str, list[str]] = {
     "Bash":       [],                        # resolved dynamically from command
@@ -61,9 +79,9 @@ _TOOL_RULES: dict[str, list[str]] = {
     "Read":       ["prevention"],
     "Glob":       [],
     "Grep":       [],
-    "Agent":      ["tiering", "agents"],     # tiering replaces legacy routing
-    "WebFetch":   [],
-    "WebSearch":  [],
+    "Agent":      ["tiering", "agents"],
+    "WebFetch":   ["web-tools"],
+    "WebSearch":  ["web-tools"],
     "TodoWrite":  [],
     "TodoRead":   [],
 }
@@ -77,16 +95,17 @@ _BASH_KEYWORD_RULES: list[tuple[re.Pattern, list[str]]] = [
     # schema migration commands
     (re.compile(r"apply_migrations|schema_v2"),     ["db-mutations"]),
     (re.compile(r"\bsystemctl\b|\bservice\b"),       ["prevention"]),
-    (re.compile(r"\bnohup\b|\bbg\b"),               []),
-    (re.compile(r"\bclauде\b|\bcc\b"),              ["tools"]),
-    (re.compile(r"\bagent\b|\borchestrat"),          ["tiering", "agents"]),
+    (re.compile(r"\bclaude\b|\bcc\b"),               ["tools"]),
+    (re.compile(r"\bagent\b|\borchestrat"),          ["tiering", "agents", "plan-gate"]),
+    (re.compile(r"\btmux\b|\byazi\b|bin/workspace|launch_(swarm|beeswarm|monitor)"), ["workspace"]),
     (re.compile(r"generate_company|save_response|intl.writer|intl.reports"), ["intl-reports"]),
+    (re.compile(r"\bfirecrawl\b"),                   ["web-tools"]),
 ]
 
 # ── File extension → rules ───────────────────────────────────────────────────
 _EXT_RULES: dict[str, list[str]] = {
     ".py":   ["python", "quality"],
-    ".md":   ["ops"],
+    ".md":   [],
     ".json": [],
     ".sql":  ["db-mutations", "prevention"],  # SQL edits always get DB mutation rules
     ".sh":   ["git-safety"],
@@ -97,11 +116,25 @@ _EXT_RULES: dict[str, list[str]] = {
 
 
 def _read(alias: str) -> str:
-    """Read rule file content; return empty string on any error."""
-    path = RULES_DB / _REGISTRY.get(alias, "")
+    """Read rule file content; return empty string on any error.
+
+    Fail-open by contract (hook errors must degrade to APPROVE), but emit a
+    degraded-signal warning to stderr so missing/broken rule files are visible
+    in hook logs instead of silently injecting nothing.
+    """
+    rel = _REGISTRY.get(alias, "")
+    if not rel:
+        print(f"[rules_dispatcher] WARN: unknown rule alias '{alias}'", file=sys.stderr)
+        return ""
+    path = RULES_DB / rel
     try:
         return path.read_text(encoding="utf-8").strip()
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[rules_dispatcher] WARN: rule file unreadable for alias "
+            f"'{alias}' ({path}): {exc.__class__.__name__}",
+            file=sys.stderr,
+        )
         return ""
 
 
@@ -165,6 +198,22 @@ def get_rules(tool: str, tool_input: dict) -> str:
     return "\n\n".join(parts)
 
 
+_ENCODING = None
+
+
 def token_estimate(text: str) -> int:
-    """Rough token estimate (word count / 0.75)."""
-    return round(len(text.split()) / 0.75)
+    """Real cl100k_base token count (tiktoken). Falls back to the word-count
+    heuristic only if tiktoken/its encoding data is unavailable — that
+    heuristic undercounts real BPE tokens by ~30-40% on this corpus and must
+    never be the source of a number cited in docs."""
+    global _ENCODING
+    if _ENCODING is None:
+        try:
+            import tiktoken
+
+            _ENCODING = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            _ENCODING = False
+    if _ENCODING is False:
+        return round(len(text.split()) / 0.75)
+    return len(_ENCODING.encode(text))

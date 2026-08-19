@@ -30,6 +30,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))  # bin/
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from bin.core.logging_config import get_logger as _get_logger
+from bin.core import human_pending
+from bin.core.human_pending import events
+from bin.core.project_context import (
+    end_project,
+    get_budget_status,
+    get_project,
+    known_projects,
+    set_project,
+)
 from voice_handler import transcribe_audio, synthesize_speech
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -54,6 +63,12 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
+# httpx logs every request URL at INFO, and Telegram's API URL embeds the bot
+# token — that is how the token ended up in a log on 2026-08-06. Keep the
+# transport loggers at WARNING so the token never reaches the log file or
+# journald in the first place.
+for _noisy in ("httpx", "httpcore", "telegram.request", "telegram.ext.Updater"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = _get_logger(__name__)
 
 # ── Global app reference (set in main()) ───────────────────────────────────────
@@ -109,7 +124,7 @@ def authorized(update: Update) -> bool:
 
 def db_query(sql: str, params: tuple = ()) -> list:
     try:
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB, timeout=30)
         rows = conn.execute(sql, params).fetchall()
         conn.close()
         return rows
@@ -205,7 +220,7 @@ def _log_satisfaction(
     user_satisfaction: int | None = None,
 ) -> None:
     try:
-        conn = sqlite3.connect(str(DB), timeout=2)
+        conn = sqlite3.connect(str(DB), timeout=30)
         conn.execute(
             "INSERT INTO model_satisfaction "
             "(session_id, model_used, task_type, task_description, "
@@ -300,7 +315,7 @@ async def _run_task(task_id: str, description: str, chat_id: str) -> None:
     pending_key = f"sat_{task_id}"
     PENDING_SATISFACTION[pending_key] = {
         "session_id": task_id,
-        "model_used": "claude-sonnet-4-6",
+        "model_used": "claude-sonnet-5",
         "task_type": task_type,
         "task_description": description[:100],
         "duration_ms": duration_ms,
@@ -310,7 +325,7 @@ async def _run_task(task_id: str, description: str, chat_id: str) -> None:
     # Write immediately — guarantees data even if user never clicks 👍/👎
     _log_satisfaction(
         session_id=task_id,
-        model_used="claude-sonnet-4-6",
+        model_used="claude-sonnet-5",
         task_type=task_type,
         task_description=description[:100],
         duration_ms=duration_ms,
@@ -354,7 +369,7 @@ async def handle_satisfaction_callback(
         return
     # Update existing row (written immediately on task completion)
     try:
-        conn = sqlite3.connect(str(DB), timeout=2)
+        conn = sqlite3.connect(str(DB), timeout=30)
         conn.execute(
             "UPDATE model_satisfaction SET user_satisfaction=? "
             "WHERE id=(SELECT MAX(id) FROM model_satisfaction WHERE session_id=?)",
@@ -367,6 +382,83 @@ async def handle_satisfaction_callback(
     emoji = "👍" if rating else "👎"
     await query.edit_message_text(f"{emoji} Registrado.")
     log.info("Satisfaction: %s | %s | rating=%d", key, record.get("task_type"), rating)
+
+
+async def handle_resume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """hpt: family — resume flow for human_pending_tasks (jarvis-control3 v2).
+    100% DB-driven (no in-RAM dicts): the row itself is the source of truth,
+    so this survives bot restarts. Per-row allowed_chat_id, NOT the global
+    ALLOWED_CHAT_ID — a row is only actionable by the chat that owns it.
+    Two-tap confused-deputy confirmation before the row is unblocked: a
+    prompt-injected sub-agent could otherwise insert a hostile row and rely
+    on a single accidental tap to move it toward execution."""
+    query = update.callback_query
+    data = query.data or ""
+    if not data.startswith(("hpt:", "hptok:", "hptno:")):
+        return
+
+    prefix, _, task_id = data.partition(":")
+    row = human_pending.get_task(task_id)
+    if not row:
+        await _safe_answer(query, "Tarea no encontrada o ya archivada.")
+        return
+
+    if str(update.effective_chat.id) != str(row["allowed_chat_id"]):
+        log.warning("hpt: unauthorized chat %s tried to act on row %s", update.effective_chat.id, task_id)
+        await _safe_answer(query, "No autorizado.")
+        return
+
+    await _safe_answer(query)
+
+    if prefix == "hpt:":
+        if row["status"] != "notified":
+            await query.edit_message_text(f"(ya procesado: {row['status']})")
+            return
+        confirm_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Confirmar reanudar", callback_data=f"hptok:{task_id}"),
+            InlineKeyboardButton("❌ Cancelar", callback_data=f"hptno:{task_id}"),
+        ]])
+        await query.edit_message_text(
+            f"Reanudar {row['project']} / {row['action_id']}?\n"
+            f"resume_args: {row['resume_args']}\n"
+            f"Confirma para desbloquear (un worker separado ejecutará).",
+            reply_markup=confirm_kb,
+        )
+        return
+
+    if prefix == "hptok:":
+        if row["status"] != "notified":
+            await query.edit_message_text(f"(ya procesado: {row['status']})")
+            return
+        ok = human_pending.unblock(task_id)
+        events.insert_event(task_id, "resolved_by_user", {"chat_id": str(update.effective_chat.id)})
+        if ok:
+            await query.edit_message_text("✅ Desbloqueado. Pendiente de ejecución por worker.")
+        else:
+            await query.edit_message_text("(ya procesado por otro tap)")
+        return
+
+    if prefix == "hptno:":
+        if row["status"] not in ("pending", "notified", "unblocked"):
+            await query.edit_message_text(f"(ya procesado: {row['status']})")
+            return
+        try:
+            ok = human_pending.cancel(task_id, resolved_by=str(update.effective_chat.id))
+            await query.edit_message_text("❌ Cancelado." if ok else "(ya procesado por otro tap)")
+        except Exception as exc:
+            log.error("hptno: failed to cancel %s: %s", task_id, exc)
+            await query.edit_message_text("(error al cancelar, ver logs)")
+        return
+
+
+async def _safe_answer(query, text: str | None = None) -> None:
+    try:
+        if text:
+            await query.answer(text, show_alert=True)
+        else:
+            await query.answer()
+    except Exception:
+        pass  # Telegram callback tokens expire; the DB transition below still applies
 
 
 async def _spawn_task(update: Update, description: str) -> str:
@@ -529,7 +621,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     project = args[0] if args else "math-image-generator"
 
     try:
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB, timeout=30)
         ranking = conn.execute(
             "SELECT * FROM tier_ranking WHERE model_tier='tier3'"
         ).fetchone()
@@ -552,7 +644,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         renderers_text = (
             "\n".join(
                 [
-                    f"  {'✅' if r[5] else '⚠️'} {r[0]}: "
+                    f"  {'✅' if r[5] else '⚠'} {r[0]}: "
                     f"{r[1]} LOC | {r[2]:.1f}s | "
                     f"SSIM {f'{r[4]:.3f}' if r[4] else 'N/A'}"
                     for r in metrics
@@ -714,7 +806,7 @@ async def cmd_loop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except asyncio.TimeoutError:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"⚠️ *Loop timeout* (>2h) — {project}\nVerifica el VPS manualmente.",
+                text=f"⚠ *Loop timeout* (>2h) — {project}\nVerifica el VPS manualmente.",
                 parse_mode="Markdown",
             )
         except Exception as e:
@@ -973,7 +1065,7 @@ async def cmd_research_status(
     if not authorized(update):
         await update.message.reply_text("Unauthorized.")
         return
-    conn = sqlite3.connect(str(DB), timeout=5)
+    conn = sqlite3.connect(str(DB), timeout=30)
     rows = conn.execute(
         "SELECT status, COUNT(*) FROM research_items GROUP BY status ORDER BY COUNT(*) DESC"
     ).fetchall()
@@ -1019,7 +1111,7 @@ async def _handle_integrar(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("Usage: /integrar_<id>")
         return
     item_id = int(m.group(1))
-    conn = sqlite3.connect(str(DB), timeout=5)
+    conn = sqlite3.connect(str(DB), timeout=30)
     conn.execute("UPDATE research_items SET status='INTEGRADO' WHERE id=?", (item_id,))
     conn.commit()
     conn.close()
@@ -1037,7 +1129,7 @@ async def _handle_rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("Usage: /rechazar_<id>")
         return
     item_id = int(m.group(1))
-    conn = sqlite3.connect(str(DB), timeout=5)
+    conn = sqlite3.connect(str(DB), timeout=30)
     conn.execute(
         "UPDATE research_items SET status='RECHAZADO_MANUAL' WHERE id=?", (item_id,)
     )
@@ -1131,7 +1223,7 @@ _CC_MAX_PER_HOUR = 10
 def _cc_ensure_table() -> None:
     """Create cc_rate_limit table if it doesn't exist; enable WAL mode."""
     try:
-        conn = sqlite3.connect(str(DB), timeout=10)
+        conn = sqlite3.connect(str(DB), timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""CREATE TABLE IF NOT EXISTS cc_rate_limit (
                 chat_id TEXT NOT NULL,
@@ -1149,7 +1241,7 @@ _cc_ensure_table()
 def _cc_rate_count(chat_id: str) -> int:
     """Return number of /cc uses by chat_id in the last hour."""
     try:
-        conn = sqlite3.connect(str(DB), timeout=10)
+        conn = sqlite3.connect(str(DB), timeout=30)
         count = conn.execute(
             "SELECT COUNT(*) FROM cc_rate_limit WHERE chat_id = ? "
             "AND timestamp > datetime('now', '-1 hour')",
@@ -1198,7 +1290,7 @@ _CC_MAX_LENGTH = 500
 def _cc_rate_ok(chat_id: str) -> bool:
     """Returns True if chat_id is within rate limit (persistent SQLite store)."""
     try:
-        conn = sqlite3.connect(str(DB), timeout=10)
+        conn = sqlite3.connect(str(DB), timeout=30)
         conn.execute(
             "DELETE FROM cc_rate_limit WHERE timestamp < datetime('now', '-1 hour')"
         )
@@ -1252,25 +1344,29 @@ def _log_cc_command(
     success: bool,
     response_len: int,
     session_id: str = "",
+    project: str | None = None,
 ) -> None:
     """Log /cc command usage to dqiii8.db."""
     import time as _time
 
     sid = session_id or f"tg_bot_{int(_time.time())}"
     try:
-        conn = sqlite3.connect(DB)
+        conn = sqlite3.connect(DB, timeout=30)
         conn.execute(
             "INSERT INTO agent_actions "
-            "(session_id, agent_name, tool_used, action_type, input_tokens, output_tokens, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(session_id, agent_name, tool_used, action_type, notes, project) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 sid,
                 agent or "cc_direct",
                 command,
                 "telegram_command",
-                len(prompt),
-                response_len,
-                f"success={success}",
+                # D4: input_tokens/output_tokens are real-token-count columns —
+                # this bot only knows prompt/response character counts, not real
+                # tokens, so those go in notes instead of corrupting the token
+                # columns other writers rely on for real cost analytics.
+                f"success={success} prompt_chars={len(prompt)} response_chars={response_len}",
+                project,
             ),
         )
         conn.commit()
@@ -1293,7 +1389,7 @@ def _run_claude(
         "--output-format",
         "json",
         "--model",
-        "claude-sonnet-4-6",
+        "claude-sonnet-5",
     ]
     if system_prompt:
         cmd += ["--system-prompt", system_prompt]
@@ -1346,29 +1442,34 @@ async def _run_cc_async(
     prompt: str,
     cwd: Path,
     system_prompt: str | None = None,
-    model: str = "claude-sonnet-4-6",
+    model: str = "claude-sonnet-5",
     progress_msg=None,
     project_label: str = "dqiii8",
 ) -> tuple[bool, str, list]:
     """Run claude -p as async subprocess with live Telegram progress edits.
 
     Safe: uses create_subprocess_exec (no shell). Prompt is internal.
+
+    Always launched from JARVIS (DQIII8 root) so Claude Code discovers
+    /root/dqiii8/.claude/settings.json — sub-projects are separate git repos
+    without their own settings.json, and Claude Code resolves settings from the
+    session cwd's git root, so launching there silently drops every telemetry
+    hook (agent_actions/error_log/skill_metrics went dark 2026-07-05..08-11).
+    The target project is exposed via --add-dir instead.
     """
     from orchestrator import detect_phase, format_progress, parse_output
 
-    cmd = ["claude", "-p", "--model", model, "--output-format", "text", prompt]
+    target = Path(cwd).resolve()
+    extra_dirs: list[str] = []
+    if target != JARVIS.resolve():
+        extra_dirs = ["--add-dir", str(target)]
+        scope_note = f"WORKING DIRECTORY FOR THIS TASK: {target}\n"
+        system_prompt = scope_note + (system_prompt or "")
+
+    cmd = ["claude", "-p", "--model", model, *extra_dirs]
     if system_prompt:
-        cmd = [
-            "claude",
-            "-p",
-            "--model",
-            model,
-            "--system-prompt",
-            system_prompt,
-            "--output-format",
-            "text",
-            prompt,
-        ]
+        cmd += ["--system-prompt", system_prompt]
+    cmd += ["--output-format", "text", prompt]
 
     env = _load_env_dict()
     env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
@@ -1381,7 +1482,7 @@ async def _run_cc_async(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=str(cwd),
+        cwd=str(JARVIS),
         env=env,
     )
 
@@ -1406,7 +1507,6 @@ async def _run_cc_async(
             last_update = now
 
     await proc.wait()
-    elapsed = time.time() - t0
 
     stderr = ""
     if proc.stderr:
@@ -1416,8 +1516,32 @@ async def _run_cc_async(
     if not full_output.strip() and stderr:
         full_output = stderr[:2000]
 
-    parsed = parse_output(full_output, cwd)
-    return proc.returncode == 0, full_output, parsed["files"]
+    # claude now runs from JARVIS, so relative paths in its output may be
+    # relative to either root; resolve against both and de-duplicate.
+    candidates = parse_output(full_output, target)["files"]
+    if extra_dirs:
+        seen = {str(p) for p in candidates}
+        candidates += [
+            p for p in parse_output(full_output, JARVIS)["files"] if str(p) not in seen
+        ]
+
+    # parse_output joins emitted relative paths onto a root without normalising,
+    # so "Created: ../../CLAUDE.md" escapes the project and cmd_cc would then
+    # upload it to Telegram. Keep only paths that really live under a root we
+    # granted this run, and de-duplicate again after normalisation.
+    roots = [JARVIS.resolve()] + ([target] if extra_dirs else [])
+    files: list = []
+    kept: set[str] = set()
+    for p in candidates:
+        rp = p.resolve()
+        if str(rp) in kept:
+            continue
+        if any(rp == r or r in rp.parents for r in roots):
+            files.append(rp)
+            kept.add(str(rp))
+        else:
+            log.warning("Dropped out-of-scope output path: %s", p)
+    return proc.returncode == 0, full_output, files
 
 
 async def _run_groq_direct(prompt: str, system_prompt: str = "") -> tuple[bool, str]:
@@ -1498,7 +1622,7 @@ async def cmd_cc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reason = _cc_check(prompt)
     if reason:
         await update.message.reply_text(f"Blocked: {reason}")
-        _log_cc_command("/cc", prompt, None, False, 0, f"tg_{chat_id}")
+        _log_cc_command("/cc", prompt, None, False, 0, f"tg_{chat_id}", project=None)
         return
     if not _cc_rate_ok(chat_id):
         await update.message.reply_text(
@@ -1548,7 +1672,7 @@ async def cmd_cc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             prompt=prompt,
             cwd=project["path"],
             system_prompt=ctx,
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             progress_msg=progress_msg,
             project_label=label,
         )
@@ -1578,7 +1702,7 @@ async def cmd_cc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
-    _log_cc_command("/cc", prompt, None, success, len(output), f"tg_{chat_id}")
+    _log_cc_command("/cc", prompt, None, success, len(output), f"tg_{chat_id}", project=label)
     await send_chunks(update, output)
 
     for fpath in files[:5]:
@@ -1637,7 +1761,12 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     # ── Ralph verification loop: run smoke tests, retry once on failure ──
-    max_retries = 2
+    # No sub-project ships tests/test_smoke.py, and pytest exits 4 ("file not
+    # found") for a missing path — indistinguishable from a real failure, so the
+    # loop used to fire two bogus "tests failed, fix them" reruns on every
+    # sub-project /auto. Only verify where the smoke test actually exists.
+    smoke_test = Path(project["path"]) / "tests" / "test_smoke.py"
+    max_retries = 2 if smoke_test.exists() else 0
     for attempt in range(1, max_retries + 1):
         if not success:
             break  # execution itself failed, no point testing
@@ -1687,7 +1816,7 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
 
-    _log_cc_command("/auto", goal, None, success, len(output), f"tg_{chat_id}")
+    _log_cc_command("/auto", goal, None, success, len(output), f"tg_{chat_id}", project=label)
     await send_chunks(update, output)
 
     for fpath in files[:5]:
@@ -1700,35 +1829,194 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("Failed to send file %s: %s", fpath, exc)
 
 
+def _hora_inicio(project: str, source: str = "telegram") -> str:
+    """Open a human_hours session for `project`. Returns a user-facing message."""
+    import datetime as _dt
+    try:
+        conn = sqlite3.connect(DB, timeout=30)
+        try:
+            conn.execute(
+                "INSERT INTO human_hours (project, started_at, source) VALUES (?, ?, ?)",
+                (project, _dt.datetime.now(_dt.timezone.utc).isoformat(), source),
+            )
+            conn.commit()
+            return f"Sesion iniciada para '{project}'."
+        except sqlite3.IntegrityError:
+            return f"Ya hay una sesion abierta para '{project}'. Usa /hora fin primero."
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.warning("_hora_inicio DB error: %s", exc)
+        return "Error al iniciar la sesion. Revisa los logs."
+
+
+def _hora_fin(project: str) -> str:
+    """Close the open human_hours session for `project`, if any."""
+    import datetime as _dt
+    try:
+        conn = sqlite3.connect(DB, timeout=30)
+        try:
+            cur = conn.execute(
+                "UPDATE human_hours SET ended_at = ? "
+                "WHERE project = ? AND ended_at IS NULL",
+                (_dt.datetime.now(_dt.timezone.utc).isoformat(), project),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return f"No hay ninguna sesion abierta para '{project}'."
+            return f"Sesion cerrada para '{project}'."
+        finally:
+            conn.close()
+    except Exception as exc:
+        log.warning("_hora_fin DB error: %s", exc)
+        return "Error al cerrar la sesion. Revisa los logs."
+
+
+async def cmd_hora(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/hora inicio [proyecto] | /hora fin <proyecto> — human work-session tracking.
+    inicio with no argument defaults to the resolved project_context (/proyecto)."""
+    if not authorized(update):
+        return
+    if update.message is None:
+        return
+    text = (update.message.text or "").strip()
+    # Strip an optional group-chat "@BotName" suffix on the command itself
+    # (e.g. "/hora@dqiii8_bot inicio x"), same edge case /cc and /auto don't
+    # need to handle since this bot is only used in a 1:1 chat, but /hora's
+    # exact command text is matched more literally below.
+    text = re.sub(r"^/hora(@\S+)?", "/hora", text, count=1)
+    args = text[len("/hora"):].strip().split(maxsplit=1)
+    if not args or args[0] not in ("inicio", "fin"):
+        await update.message.reply_text(
+            "Usage: /hora inicio [proyecto]\n/hora fin <proyecto>"
+        )
+        return
+    action = args[0]
+    project = args[1].strip() if len(args) > 1 else ""
+    if not project:
+        if action == "fin":
+            await update.message.reply_text("Usage: /hora fin <proyecto>")
+            return
+        project = get_project("global") or ""
+        if not project:
+            await update.message.reply_text(
+                "No hay proyecto activo. Usa /proyecto <nombre> o /hora inicio <proyecto>."
+            )
+            return
+    if action == "inicio":
+        msg = _hora_inicio(project, source="telegram")
+    else:
+        msg = _hora_fin(project)
+    await update.message.reply_text(msg)
+
+
+async def cmd_proyecto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/proyecto [nombre|fin] — declare/show/close the active project (scope global)."""
+    if not authorized(update):
+        return
+    if update.message is None:
+        return
+    text = (update.message.text or "").strip()
+    text = re.sub(r"^/proyecto(@\S+)?", "/proyecto", text, count=1)
+    arg = text[len("/proyecto"):].strip()
+
+    if not arg:
+        current = get_project("global")
+        msg = f"Proyecto activo: {current}" if current else "No hay proyecto activo."
+        await update.message.reply_text(msg)
+        return
+
+    if arg == "fin":
+        closed = end_project("global")
+        msg = "Proyecto cerrado." if closed else "No habia proyecto activo."
+        await update.message.reply_text(msg)
+        return
+
+    if arg == "status":
+        current = get_project("global")
+        if not current:
+            await update.message.reply_text("No hay proyecto activo.")
+            return
+        rows = get_budget_status(current)
+        if not rows:
+            await update.message.reply_text(f"Sin datos de presupuesto para '{current}'.")
+            return
+        r = rows[0]
+        # coste_humano_eur/coste_total_eur/desviacion_pct come back NULL (not 0)
+        # when labor_rates has no row yet — show "N/D" instead of a literal
+        # "None" leaking into the reply (disaster-scenario fix, 2026-08-12).
+        nd = lambda v, suffix="": f"{v}{suffix}" if v is not None else "N/D"
+        lines = [
+            f"**Presupuesto — {r['project']}**",
+            "",
+            f"**Presupuesto:** {r['presupuesto_eur']} EUR",
+            f"**Coste humano:** {nd(r['coste_humano_eur'], ' EUR')} ({r['human_hours']}h)",
+            f"**Coste infra:** {r['coste_infra_eur']} EUR",
+            f"**Coste total:** {nd(r['coste_total_eur'], ' EUR')}",
+            f"**Desviacion:** {nd(r['desviacion_pct'], '%')}",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    try:
+        set_project(arg, scope="global", declared_by="telegram")
+    except ValueError:
+        await update.message.reply_text(
+            f"Proyecto invalido: {arg!r}\nProyectos conocidos: {', '.join(sorted(known_projects()))}"
+        )
+        return
+    await update.message.reply_text(f"Proyecto activo: {arg}")
+
+
 async def cmd_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/tokens — Show today's token usage summary from token_usage_daily view."""
     if not authorized(update):
         return
+    # Real spend and Stage-5 transcript-derived list-price-equivalent (flat-rate
+    # OAuth, not billed) are kept separate here, not blended into one $ figure —
+    # see docs/audits/2026-08-13-db-attribution-rebuild.md and Opus P1-1. The
+    # per-model breakdown used to read from token_usage_daily, whose total_cost
+    # sums cost_estimate across both sources — same conflation as the totals had
+    # (Opus red-team review, 2026-08-13, P3) — so it now queries token_usage
+    # directly with the same source-aware split as the totals below.
     rows = db_query(
-        "SELECT model, tier, calls, total_input, total_output, total_tokens, "
-        "total_cost FROM token_usage_daily WHERE day = date('now') "
-        "ORDER BY total_tokens DESC"
+        "SELECT model, tier, COUNT(*) as calls, SUM(total_tokens) as total, "
+        "  SUM(CASE WHEN source = 'claude_code_transcript' THEN 0 ELSE cost_estimate END) as real_cost, "
+        "  SUM(CASE WHEN source = 'claude_code_transcript' THEN cost_estimate ELSE 0 END) as listprice_cost "
+        "FROM token_usage WHERE date(timestamp) = date('now') "
+        "GROUP BY model, tier ORDER BY total DESC"
     )
     if not rows:
         await update.message.reply_text("No token usage recorded today.")
         return
     totals = db_query(
-        "SELECT SUM(calls), SUM(total_input), SUM(total_output), "
-        "SUM(total_tokens), SUM(total_cost) FROM token_usage_daily "
-        "WHERE day = date('now')"
+        "SELECT SUM(calls), SUM(total_input), SUM(total_output), SUM(total_tokens) "
+        "FROM token_usage_daily WHERE day = date('now')"
+    )
+    cost_split = db_query(
+        "SELECT "
+        "  SUM(CASE WHEN source = 'claude_code_transcript' THEN 0 ELSE cost_estimate END), "
+        "  SUM(CASE WHEN source = 'claude_code_transcript' THEN cost_estimate ELSE 0 END) "
+        "FROM token_usage WHERE date(timestamp) = date('now')"
     )
     lines = ["**Token Usage — Today**", ""]
-    for model, tier, calls, inp, out, total, cost in rows:
+    for model, tier, calls, total, real_cost, listprice_cost in rows:
         short_model = model.split("/")[-1] if "/" in model else model
+        cost_str = f"${real_cost:.4f}" + (
+            f" (+${listprice_cost:.4f} list-price)" if listprice_cost else ""
+        )
         lines.append(
-            f"`[{tier}] {short_model}` — {total:,} tok ({calls} calls) ${cost:.4f}"
+            f"`[{tier}] {short_model}` — {total:,} tok ({calls} calls) {cost_str}"
         )
     if totals and totals[0][0]:
         t = totals[0]
+        real_cost = (cost_split[0][0] or 0.0) if cost_split else 0.0
+        listprice_cost = (cost_split[0][1] or 0.0) if cost_split else 0.0
         lines += [
             "",
             f"**Total:** {t[3]:,} tokens ({t[1]:,} in / {t[2]:,} out)",
-            f"**Cost:** ${t[4]:.4f} USD",
+            f"**Real spend:** ${real_cost:.4f} USD",
+            f"**Claude Code list-price equivalent:** ${listprice_cost:.4f} USD (flat-rate OAuth — not billed)",
         ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -1812,6 +2100,7 @@ async def cmd_auth_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         success,
         len(output),
         f"tg_{update.effective_chat.id}",
+        project=None,
     )
 
 
@@ -1836,7 +2125,7 @@ async def _telegram_error_handler(
     log.error("Unhandled Telegram exception", exc_info=err)
     tb_str = "".join(_tb.format_exception(type(err), err, err.__traceback__))
     try:
-        conn = sqlite3.connect(str(DB), timeout=10)
+        conn = sqlite3.connect(str(DB), timeout=30)
         conn.execute(
             "INSERT INTO error_log "
             "(session_id, agent_name, error_type, error_message, cause, resolved) "
@@ -1884,6 +2173,8 @@ def main() -> None:
     APP.add_handler(CommandHandler("auth_update", cmd_auth_update))
     APP.add_handler(CommandHandler("cc", cmd_cc))
     APP.add_handler(CommandHandler("auto", cmd_auto))
+    APP.add_handler(CommandHandler("hora", cmd_hora))
+    APP.add_handler(CommandHandler("proyecto", cmd_proyecto))
     APP.add_handler(CommandHandler("cc_status", cmd_cc_status))
     APP.add_handler(CommandHandler("auth_status", cmd_auth_status))
     APP.add_handler(CommandHandler("auth_test", cmd_auth_test))
@@ -1895,21 +2186,17 @@ def main() -> None:
     APP.add_handler(CommandHandler("voice", cmd_voice))
     APP.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     APP.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
-    # intl-reports ConversationHandler (must come BEFORE generic text handler)
-    try:
-        _intl_path = str(JARVIS / "my-projects" / "intl-reports" / "core")
-        if _intl_path not in sys.path:
-            sys.path.insert(0, _intl_path)
-        from telegram_flow import build_intl_handler
-
-        APP.add_handler(build_intl_handler(allowed_chat_id=ALLOWED_CHAT_ID))
-        log.info("/intl handler registered")
-    except Exception as _exc:
-        log.warning("Failed to load intl-reports handler: %s", _exc)
-
+    # NOTE: the /intl ConversationHandler was removed 2026-08-11. It imported
+    # my-projects/intl-reports/core/telegram_flow.py, deleted in that sub-repo's
+    # v3 architecture reset (commit 19e70ad), so it only ever logged a warning at
+    # boot. It also sys.path.insert(0, ...)'d intl-reports/core ahead of the
+    # stdlib. intl-reports is driven from tmux via core.cli, not Telegram.
     APP.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     APP.add_handler(
         CallbackQueryHandler(handle_satisfaction_callback, pattern=r"^sat:")
+    )
+    APP.add_handler(
+        CallbackQueryHandler(handle_resume_callback, pattern=r"^hpt")
     )
 
     APP.add_error_handler(_telegram_error_handler)
@@ -1948,7 +2235,7 @@ def send_morning_report() -> None:
     lessons_yesterday = 0
 
     try:
-        conn = sqlite3.connect(str(DB), timeout=5)
+        conn = sqlite3.connect(str(DB), timeout=30)
 
         row = conn.execute(
             "SELECT overall_score FROM audit_reports ORDER BY timestamp DESC LIMIT 1"
@@ -2014,7 +2301,7 @@ def send_morning_report() -> None:
 
     spc_line = "\n   • ".join(spc_alerts) if spc_alerts else "none"
     msg = (
-        f"☀️ DQIII8 Morning Report — {today_str}\n"
+        f"☀ DQIII8 Morning Report — {today_str}\n"
         f"Score: {score:.0f}/100 | Sessions yesterday: {sessions_yesterday}\n"
         f"SPC alerts: {spc_line}\n"
         f"Research queue: {research_pending} pending items\n"

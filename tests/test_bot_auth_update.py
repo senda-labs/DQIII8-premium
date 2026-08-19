@@ -107,3 +107,74 @@ class TestCmdAuthUpdate:
                 await mod.cmd_auth_update(update, context)
         text = update.message.reply_text.call_args[0][0]
         assert "claude /login" in text
+
+
+def test_log_cc_command_writes_project(tmp_path, monkeypatch):
+    import sqlite3
+
+    db_path = tmp_path / "dqiii8.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE agent_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT, agent_name TEXT, tool_used TEXT, action_type TEXT,
+            input_tokens INTEGER, output_tokens INTEGER, notes TEXT, project TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(mod, "DB", db_path)
+
+    mod._log_cc_command(
+        "/cc", "prompt text", "cc_direct", True, 42,
+        session_id="test-sess", project="intl-reports",
+    )
+
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT project FROM agent_actions").fetchone()
+    conn.close()
+    assert row[0] == "intl-reports"
+
+
+def test_hora_inicio_then_fin_roundtrip(tmp_path, monkeypatch):
+    import sqlite3
+    import subprocess
+    from pathlib import Path
+
+    db_path = tmp_path / "dqiii8.db"
+    schema_path = Path(__file__).parent.parent / "database" / "schema_v2.sql"
+    subprocess.run(
+        ["sqlite3", str(db_path)],
+        input=schema_path.read_text(),
+        text=True,
+        check=True,
+    )
+    monkeypatch.setattr(mod, "DB", db_path)
+
+    inicio_msg = mod._hora_inicio("intl-reports", source="telegram")
+    assert "iniciada" in inicio_msg.lower()
+
+    conn = sqlite3.connect(str(db_path))
+    open_row = conn.execute(
+        "SELECT project, ended_at FROM human_hours WHERE project = 'intl-reports'"
+    ).fetchone()
+    conn.close()
+    assert open_row == ("intl-reports", None)
+
+    dup_msg = mod._hora_inicio("intl-reports", source="telegram")
+    assert "ya" in dup_msg.lower()  # friendly no-op, session already open
+
+    fin_msg = mod._hora_fin("intl-reports")
+    assert "cerrada" in fin_msg.lower() or "registrada" in fin_msg.lower()
+
+    conn = sqlite3.connect(str(db_path))
+    closed_row = conn.execute(
+        "SELECT ended_at FROM human_hours WHERE project = 'intl-reports'"
+    ).fetchone()
+    conn.close()
+    assert closed_row[0] is not None
+
+    noop_msg = mod._hora_fin("intl-reports")
+    assert "no hay" in noop_msg.lower() or "ninguna" in noop_msg.lower()

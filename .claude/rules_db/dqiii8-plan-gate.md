@@ -1,59 +1,27 @@
-# DQIII8 — Plan Quality Gate (Opus Escalation)
+# Plan Gate — Escalation to Opus (Tier S)
 
-> Applies when `DQIII8_MODE=autonomous` and session model is Sonnet.
+Referenced by `.claude/rules/03_tiering_and_routing.md` §Escalation to Opus and by
+`rules_dispatcher.py` alias `plan-gate`. This is the canonical statement of the gate.
 
-## When to escalate
+## When to escalate a PLAN to Opus
 
-After creating an implementation plan, self-assess against these criteria:
+Escalate ONLY when `DQIII8_MODE=autonomous` AND the plan meets ≥1 criterion:
+- Prompt < 15 words (vague intent — needs adversarial interpretation).
+- Plan touches ≥5 files.
+- Architectural decision with multiple valid paths (no single obvious answer).
 
-| Signal | Threshold |
-|--------|-----------|
-| User prompt is vague (< 15 words, no specifics) | Escalate |
-| Plan touches ≥ 5 files or ≥ 3 modules | Escalate |
-| Architectural decision with multiple valid paths | Escalate |
-| Domain you lack context on (finance, video, ML) | Escalate |
-| Plan steps are generic ("implement feature", "add tests") | Escalate |
-| Clear, scoped task with obvious implementation | Do NOT escalate |
+## Hard limits
+- Maximum **1** Opus escalation per task. Never re-escalate after Opus responds.
+- Opus is for **plan review / adversarial critique only** — never initial generation
+  (see § REGLA NIM in `00_core_behavior.md`: Anthropic-only vigente — Sonnet does the
+  initial plan, Opus only ever attacks/reviews it).
+- Opus receives: the plan + full project context + original spec. Its job is to attack
+  the plan: missing edge cases, contract violations, hidden coupling, cheaper paths.
 
-## How to escalate
-
-Spawn an Opus subagent with `model: "opus"` via the Agent tool:
-
-```
-Agent(
-  subagent_type: "Plan",
-  model: "opus",
-  prompt: """
-  Review this implementation plan for task: {task_description}
-
-  PLAN:
-  {your_plan}
-
-  CONTEXT:
-  - Project: DQIII8 (autonomous AI orchestration on VPS)
-  - Key files involved: {list}
-  - User's original prompt: {prompt}
-
-  Evaluate:
-  1. Does the plan address the actual goal, not just the literal words?
-  2. Are there critical steps missing?
-  3. Is the sequence optimal?
-  4. Are there risks the plan ignores?
-
-  Respond with:
-  - VERDICT: APPROVE | ADJUST
-  - If ADJUST: provide the revised plan with specific changes marked.
-  - Keep response under 300 words.
-  """
-)
-```
-
-## After Opus responds
-
-- **APPROVE**: Proceed with original plan.
-- **ADJUST**: Replace your plan with Opus's revised version. Do NOT re-escalate.
-
-## Cost guard
-
-- Maximum 1 Opus escalation per task. If Opus already reviewed, proceed.
-- Never escalate for: single-file edits, documentation, git operations, simple bug fixes.
+## Reality note
+There is NO automatic code path that escalates a failed free-tier chain into
+Anthropic — `"anthropic"` appears in no `FALLBACK_CHAIN` value in
+`openrouter_wrapper.py`. Opus/Sonnet are reached only via static `AGENT_ROUTING`
+entries (e.g. `orchestrator`, `code-reviewer`) or explicit user request. Treat this
+gate as a decision rule for the orchestrating session, not an implemented wrapper
+feature.
