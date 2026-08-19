@@ -147,6 +147,7 @@ objectives/failed/
 tasks/gemini_reports/
 tasks/github_reports/
 tasks/precompact_state.json
+tasks/precompact_state_*.json
 
 # Premium features (not included in free tier)
 knowledge/*/user_uploads/
