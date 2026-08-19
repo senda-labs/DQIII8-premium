@@ -58,9 +58,10 @@ except Exception:
 SESSION_ID = data.get("session_id", "unknown")
 STATE_FILE = _state_file_for(SESSION_ID)
 
-# Only session_id/project/actions_count are stored: those are the only
-# fields postcompact.py reads back. tokens_so_far/compact_trigger/started_at
-# were computed here but never consumed — dropped, not "by necessity".
+# Only session_id/project/actions_count/resume_snippet are stored: those
+# are the only fields postcompact.py reads back. tokens_so_far/
+# compact_trigger/started_at were computed here but never consumed —
+# dropped, not "by necessity".
 state: dict = {
     "session_id": SESSION_ID,
 }
@@ -82,6 +83,30 @@ try:
         ).fetchone()
         if actions_row:
             state["actions_count"] = actions_row[0]
+
+        # Rango 9 fix (2026-08-19 red-team audit): context-mode's own
+        # precompact.mjs built a continuity snapshot from its private,
+        # non-MCP SessionDB. Retiring that hook loses that snapshot, so this
+        # rebuilds an equivalent — non-MCP, Python-native — from agent_actions,
+        # which post_tool_use already populates per-session throughout the
+        # run (reuse before build, per Priority Ladder). This is a trail of
+        # recent tool actions, not a prose summary of reasoning — that's the
+        # honest ceiling of what an audit-log table can reconstruct.
+        recent_rows = conn.execute(
+            "SELECT tool_used, file_path FROM agent_actions "
+            "WHERE session_id=? ORDER BY id DESC LIMIT 10",
+            (SESSION_ID,),
+        ).fetchall()
+        lines = []
+        for tool_used, file_path in recent_rows:
+            target = (file_path or "").strip().replace("\n", " ")
+            if len(target) > 100:
+                target = target[:97] + "..."
+            line = f"{tool_used}: {target}" if target else str(tool_used)
+            if not lines or lines[-1] != line:  # collapse consecutive dupes
+                lines.append(line)
+        if lines:
+            state["resume_snippet"] = "\n".join(reversed(lines))
 
         # Increment compact_count in sessions (best-effort)
         conn.execute(
