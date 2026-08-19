@@ -112,8 +112,11 @@ if AUDIT_FLAG.exists():
         _log.warning("audit-score DB failed: %s", e)
 
 # ── Project next step ────────────────────────────────────────────────
+# Rango 8 fix (2026-08-19 red-team audit): same path bug as session_start.py
+# — JARVIS/"projects"/<x>.md never existed; real docs are at
+# my-projects/<slug>/PROJECT.md.
 next_step = "Not defined"
-pm = JARVIS / "projects" / f"{project}.md"
+pm = JARVIS / "my-projects" / project / "PROJECT.md"
 try:
     if pm.exists():
         lines = pm.read_text(encoding="utf-8").splitlines()
@@ -122,6 +125,8 @@ try:
                 if i + 1 < len(lines) and lines[i + 1].strip():
                     next_step = lines[i + 1].strip()
                 break
+    elif project != "dqiii8-core":
+        _log.warning("postcompact: PROJECT.md not found at %s", pm)
 except Exception as e:
     _log.debug("next-step unreadable: %s", e)
 

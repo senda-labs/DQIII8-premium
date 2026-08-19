@@ -69,8 +69,11 @@ except Exception as e:
     _log.debug("session-start timestamp write skipped: %s", e)
 
 # ── Project next step ──────────────────────────────────────────────
+# Rango 8 fix (2026-08-19 red-team audit): JARVIS/"projects"/<x>.md never
+# existed — real per-project docs live at my-projects/<slug>/PROJECT.md
+# (dqiii8-core has none, by design; next_step stays "Not defined" for it).
 next_step = "Not defined"
-pm = JARVIS / "projects" / f"{project}.md"
+pm = JARVIS / "my-projects" / project / "PROJECT.md"
 if pm.exists():
     lines = pm.read_text(encoding="utf-8").splitlines()
     for i, line in enumerate(lines):
@@ -78,6 +81,8 @@ if pm.exists():
             if i + 1 < len(lines) and lines[i + 1].strip():
                 next_step = lines[i + 1].strip()
             break
+elif project != "dqiii8-core":
+    _log.warning("session_start: PROJECT.md not found at %s", pm)
 
 # ── Pending audit alert (also gates the "Last audit" line below —
 # a score with nothing pending isn't actionable at session start;
@@ -110,13 +115,19 @@ if FLAG.exists():
 # ── Lazy context load ──────────────────────────────────────────────
 CONTEXT_DIR = JARVIS / "context"
 
-# user_profile.md: ALWAYS (universal context ~1KB)
+# iker_profile.md: ALWAYS (universal context ~1KB)
+# Rango 8 fix (2026-08-19 red-team audit): code looked for "user_profile.md",
+# but the file ever actually committed to context/ (gitignored, private) was
+# "iker_profile.md" — a filename mismatch that made this block a silent no-op
+# since its introduction.
 _user_profile_block = ""
-_profile_path = CONTEXT_DIR / "user_profile.md"
+_profile_path = CONTEXT_DIR / "iker_profile.md"
 if _profile_path.exists():
     _user_profile_block = "\n\nUSER PROFILE:\n" + _profile_path.read_text(
         encoding="utf-8"
     )
+else:
+    _log.warning("session_start: user profile not found at %s", _profile_path)
 
 # youtube_channels.md: ONLY if project is content
 _channels_block = ""
