@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 DQIII8 Hook — PostCompact
-Re-injects essential context after context compaction.
+Re-injects the minimum operational baseline after context compaction.
 
 Fires AFTER context-mode finishes compaction.
-Restores: active model, active project, last 3 lessons, audit score.
-Reads precompact_state.json written by precompact.py to recover previous state.
-Always exits 0 — never abort.
+Restores: active model, active project, next step, audit score (only if
+pending) — see "Injection rules" comment below. Reads precompact_state.json
+written by precompact.py to recover previous state. Always exits 0 — never
+abort.
 """
 
 import json
@@ -20,7 +21,6 @@ from pathlib import Path
 
 JARVIS = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
 DB = JARVIS / "database" / "dqiii8.db"
-LESSONS = JARVIS / "tasks" / "lessons.md"
 STATE_FILE = JARVIS / "tasks" / "precompact_state.json"
 
 _log = logging.getLogger("dqiii8.postcompact")
@@ -67,29 +67,23 @@ except Exception:
 # ── Active model ─────────────────────────────────────────────────────
 model = os.environ.get("DQIII8_MODEL", "claude-sonnet-5")
 
-# ── Last 3 lessons ───────────────────────────────────────────────────
-lessons: list[str] = []
-try:
-    if LESSONS.exists():
-        all_lines = LESSONS.read_text(encoding="utf-8").splitlines()
-        lessons = [l for l in all_lines if l.strip().startswith("[20")][-3:]
-except Exception as e:
-    _log.debug("lessons unreadable: %s", e)
-
-# ── Latest audit score ───────────────────────────────────────────────
-audit_info = "No audit"
-try:
-    if DB.exists():
-        conn = sqlite3.connect(str(DB), timeout=2)
-        row = conn.execute(
-            "SELECT timestamp, overall_score FROM audit_reports "
-            "ORDER BY timestamp DESC LIMIT 1"
-        ).fetchone()
-        conn.close()
-        if row:
-            audit_info = f"{row[0][:10]} | Score: {row[1]}/100"
-except Exception as e:
-    _log.warning("audit-score DB failed: %s", e)
+# ── Latest audit score — ONLY IF an audit is pending (a score with
+# nothing pending isn't actionable right after a compact) ─────────────
+AUDIT_FLAG = JARVIS / "tasks" / "audit_pending.flag"
+audit_info = ""
+if AUDIT_FLAG.exists():
+    try:
+        if DB.exists():
+            conn = sqlite3.connect(str(DB), timeout=2)
+            row = conn.execute(
+                "SELECT timestamp, overall_score FROM audit_reports "
+                "ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+            conn.close()
+            if row:
+                audit_info = f"\nAudit  : {row[0][:10]} | Score: {row[1]}/100 — pending, run /audit"
+    except Exception as e:
+        _log.warning("audit-score DB failed: %s", e)
 
 # ── Project next step ────────────────────────────────────────────────
 next_step = "Not defined"
@@ -121,18 +115,27 @@ try:
 except (ValueError, TypeError):
     pass
 
+# ── Injection rules (exact, by necessity) ─────────────────────────────
+# model, project, next_step : ALWAYS (minimum operational baseline)
+# audit_info                : ONLY IF tasks/audit_pending.flag exists
+# compact_hint               : ONLY IF actions_before > 50 (already conditional)
+# Conversation-content continuity (the "enterprise-grade summary of key
+# points before compacting") is NOT built here — it is already handled by
+# context-mode's own precompact.mjs/sessionstart.mjs (resume-snapshot
+# mechanism), which fires independently. Duplicating it here would be
+# redundant, not "by necessity".
 ctx = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DQIII8 — PostCompact {datetime.now().strftime('%H:%M')}
 Context compacted — state restored
 Model  : {model}
 Project: {project}
-Next   : {next_step}
-Audit  : {audit_info}
+Next   : {next_step}{audit_info}
 Session actions: {actions_before}{compact_hint}
-
-LAST LESSONS:
-{chr(10).join(lessons) if lessons else '  (none recorded)'}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"""
 
+_log.info(
+    "injected session=%s audit=%s hint=%s chars=%d",
+    session_id, bool(audit_info), bool(compact_hint), len(ctx),
+)
 print(json.dumps({"additionalContext": ctx}))
 sys.exit(0)

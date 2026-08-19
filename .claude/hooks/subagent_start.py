@@ -13,12 +13,25 @@ Responsibilities:
 import sys
 import json
 import logging
+import logging.handlers
+import re
 import time
 import os
 import subprocess
 from pathlib import Path
 
 log = logging.getLogger("dqiii8." + __name__)
+if not log.handlers:
+    log.setLevel(logging.DEBUG)
+    _log_dir = Path("/var/log/dqiii8")
+    if _log_dir.exists():
+        _fh = logging.handlers.RotatingFileHandler(
+            str(_log_dir / "hooks.log"), maxBytes=2_000_000, backupCount=3
+        )
+        _fh.setFormatter(logging.Formatter("%(asctime)s [subagent_start] %(levelname)s %(message)s"))
+        log.addHandler(_fh)
+    else:
+        log.addHandler(logging.NullHandler())
 
 try:
     data = json.load(sys.stdin)
@@ -28,6 +41,14 @@ except Exception:
 agent_id = data.get("agent_id", "")
 agent_type = data.get("agent_type", "")
 session_id = data.get("session_id", "unknown")
+
+# Reject a malformed agent_id before it is interpolated into any filesystem
+# path or git branch name below — treat it the same as "absent" (both the
+# worktree block and the lookup-file write are already gated on `agent_id`).
+_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+if agent_id and not _AGENT_ID_RE.match(agent_id):
+    log.warning("subagent_start: agent_id failed format validation, treating as absent: %r", agent_id[:80])
+    agent_id = ""
 timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
 # ── Map agent_type to DQIII8 agent name ─────────────────────────────────────
@@ -53,15 +74,22 @@ worktree_path = ""
 if resolved_name in WORKTREE_AGENTS and agent_id:
     DQIII8_ROOT = os.environ.get("DQIII8_ROOT", "/root/dqiii8")
     wt_dir = f"/tmp/dqiii8-wt/{agent_id}"
-    branch = f"wt-{agent_id[:8]}"
+    branch = f"wt-{agent_id}"
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["git", "worktree", "add", wt_dir, "-b", branch],
             cwd=DQIII8_ROOT,
             capture_output=True,
             timeout=15,
         )
-        worktree_path = wt_dir
+        if result.returncode == 0:
+            worktree_path = wt_dir
+        else:
+            log.warning(
+                "subagent_start: git worktree add exited %d: %s",
+                result.returncode,
+                result.stderr.decode("utf-8", errors="replace")[:500],
+            )  # worktree failure must never block agent execution
     except Exception as e:
         log.warning("subagent_start: git worktree creation failed: %s", e, exc_info=True)  # worktree failure must never block agent execution
 
@@ -119,6 +147,7 @@ if worktree_path:
         f" Your isolated working directory is {worktree_path}. "
         f"When done, clean up with: git worktree remove --force {worktree_path}"
     )
+log.info("injected agent_id=%s type=%s worktree=%s chars=%d", agent_id, resolved_name, bool(worktree_path), len(ctx))
 print(json.dumps({"additionalContext": ctx}))
 
 sys.exit(0)

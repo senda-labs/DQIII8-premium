@@ -10,9 +10,10 @@ frequency drifts into mechanical pre-commit checks so they cannot come back:
   1. check_registry_reachability()  — no orphan/dangling `_REGISTRY` alias.
      (`routing`, `performance`, `git-workflow`, `workflow`, `testing` were all
      registered-but-unreachable; two of them also redefined canonical taxonomy.)
-  2. check_token_budget()           — the dispatcher docstring, DYNAMIC.md and
-     02_hooks_and_permissions.md (x2) must quote ONE range. It went stale twice
-     on 2026-08-17 alone, which is exactly what a mechanical check is for.
+  2. check_token_budget()           — the dispatcher docstring is the single
+     source for the token range; 02_hooks_and_permissions.md must not restate
+     it. It went stale twice on 2026-08-17 alone (back when a second file also
+     quoted it), which is exactly what a mechanical check is for.
   3. check_agent_names_exist()      — an agent cited in a routing table must
      exist in `AGENT_ROUTING` or as a `.claude/agents/*.md` file.
   4. check_model_slugs_match_code() — a model slug a rule file presents as
@@ -58,7 +59,6 @@ import rules_registry_introspect as intro  # noqa: E402
 
 DISPATCHER = ".claude/hooks/rules_dispatcher.py"
 WRAPPER = "bin/core/openrouter_wrapper.py"
-DYNAMIC_MD = ".claude/rules/DYNAMIC.md"
 HOOKS_PERMS_MD = ".claude/rules/02_hooks_and_permissions.md"
 CORE_BEHAVIOR_MD = ".claude/rules/00_core_behavior.md"
 TIERING_MD = ".claude/rules/03_tiering_and_routing.md"
@@ -347,17 +347,16 @@ def _canonical_session_floor(dispatcher_src: str) -> int | None:
 
 def check_token_budget(src: Source) -> tuple[list[str], list[str]]:
     """The dispatcher docstring is the single source for the measured token
-    range; DYNAMIC.md must quote it verbatim, and
-    02_hooks_and_permissions.md must not quote it at all.
+    range; 02_hooks_and_permissions.md must not quote it at all.
 
     Places stating this number drifted twice on 2026-08-17 alone, and again on
     2026-08-18 — that last time in BOTH directions while this check still
     printed "consistent", because it only cross-checked prose against prose.
     It now also MEASURES, holding BOTH bounds to exact equality: the real floor,
     the maximum reachable injection (derived from the dispatcher's own tables,
-    not from a hand-written probe), and the per-session floor that includes the
-    two files Claude Code auto-injects. Measurement reads the worktree even under
-    --staged: token_estimate() needs real files on disk.
+    not from a hand-written probe), and the per-session floor that includes
+    the one file Claude Code auto-injects (CLAUDE.md). Measurement reads the
+    worktree even under --staged: token_estimate() needs real files on disk.
     """
     problems: list[str] = []
     warnings: list[str] = []
@@ -380,10 +379,9 @@ def check_token_budget(src: Source) -> tuple[list[str], list[str]]:
     if session_floor is None:
         problems.append(
             f"{DISPATCHER}: the docstring publishes 'suelo {floor}' (dispatcher-only) "
-            "but no 'suelo de sesión N'. CLAUDE.md and DYNAMIC.md are auto-injected "
-            "into every session and nothing else measures them, so the dispatcher "
-            "floor alone reads as a ~2.6x understatement of the real context tax "
-            "(C8, 2026-08-18). Publish both."
+            "but no 'suelo de sesión N'. CLAUDE.md is auto-injected into every "
+            "session and nothing else measures it, so the dispatcher floor alone "
+            "understates the real context tax (C8, 2026-08-18). Publish both."
         )
 
     # The docstring also restates the range in rounded prose ("~1.430-4.470
@@ -398,44 +396,6 @@ def check_token_budget(src: Source) -> tuple[list[str], list[str]]:
                 f"{DISPATCHER}: prose range {raw_lo}-{raw_hi} is not a rounding "
                 f"of the canonical {floor}-{ceiling}."
             )
-
-    # DYNAMIC.md: >=1 occurrence, and it must match the canonical range.
-    for rel, expected_min in ((DYNAMIC_MD, 1),):
-        text = src.read(rel)
-        if text is None:
-            problems.append(f"cannot read {rel}")
-            continue
-        found = _RANGE.findall(text)
-        if len(found) < expected_min:
-            problems.append(
-                f"{rel}: expected at least {expected_min} citation(s) of the "
-                f"token range '{floor}-{ceiling}', found {len(found)}. The two "
-                "sites that quote this number must be updated together."
-            )
-        for raw_lo, raw_hi in found:
-            lo, hi = _num(raw_lo), _num(raw_hi)
-            if (lo, hi) != (floor, ceiling):
-                problems.append(
-                    f"{rel}: token range '{raw_lo}-{raw_hi}' disagrees with the "
-                    f"canonical '{floor}-{ceiling}' in {DISPATCHER}'s docstring."
-                )
-        # Prose restatements of any published bound ("el suelo de 1.432 es ...").
-        # The session floor is stripped before the generic `suelo` sweep so the
-        # two numbers cannot be confused for each other.
-        for pattern, expected, label, scan in (
-            (_SESSION_FLOOR, session_floor, "suelo de sesión", text),
-            (_CANON_FLOOR, floor, "suelo", _SESSION_FLOOR.sub(" ", text)),
-            (_CANON_CEIL, ceiling, "techo", text),
-        ):
-            if expected is None:
-                continue
-            for raw in pattern.findall(scan):
-                value = _num(raw)
-                if value is not None and value != expected:
-                    problems.append(
-                        f"{rel}: {label} stated as {raw} but the canonical "
-                        f"{label} is {expected}."
-                    )
 
     # 02_hooks_and_permissions.md is itself injected and itself counts toward
     # the ceiling it used to describe. It must point at the docstring, never
@@ -556,19 +516,18 @@ def _measured_ceiling(rd) -> tuple[int, str]:
 
 
 def _session_floor(rd, root: Path) -> int | None:
-    """Dispatcher floor + the two files Claude Code auto-injects every session.
+    """Dispatcher floor + the one file Claude Code auto-injects every session.
 
-    `CLAUDE.md` and `.claude/rules/DYNAMIC.md` are outside rules_dispatcher's
-    control and nothing measured them before (C8, 2026-08-18), so the published
-    946 read as "minimum context tax per session" while the real figure was
-    ~2.6x that. Measuring them here means they cannot grow unobserved either.
+    `CLAUDE.md` is outside rules_dispatcher's control and nothing measured it
+    before (C8, 2026-08-18), so the published floor read as "minimum context
+    tax per session" while the real figure was higher. Measuring it here means
+    it cannot grow unobserved.
     """
     total = rd.token_estimate(rd.get_rules("Glob", {}))
-    for rel in ("CLAUDE.md", DYNAMIC_MD):
-        try:
-            total += rd.token_estimate((root / rel).read_text(encoding="utf-8").strip())
-        except OSError:
-            return None
+    try:
+        total += rd.token_estimate((root / "CLAUDE.md").read_text(encoding="utf-8").strip())
+    except OSError:
+        return None
     return total
 
 
@@ -601,7 +560,7 @@ def _measured_range_problems(
         problems.append(
             f"{DISPATCHER}: docstring floor is {floor} but the measured "
             f"_ALWAYS-only injection is {measured_floor}. Re-measure and update "
-            f"the docstring and {DYNAMIC_MD} together."
+            "the docstring."
         )
 
     measured_ceiling, label = _measured_ceiling(rd)
@@ -610,8 +569,8 @@ def _measured_range_problems(
         problems.append(
             f"{DISPATCHER}: docstring ceiling is {ceiling} but the maximum "
             f"reachable injection ('{label}') measures {measured_ceiling} — "
-            f"{direction}. Re-publish the ceiling in the docstring and "
-            f"{DYNAMIC_MD} together, AFTER the last edit to any injected file."
+            f"{direction}. Re-publish the ceiling in the docstring, AFTER the "
+            "last edit to any injected file."
         )
 
     # Achievability: the analytic maximum must be producible by a real tool call.
@@ -628,15 +587,14 @@ def _measured_range_problems(
         measured_session = _session_floor(rd, src.root)
         if measured_session is None:
             problems.append(
-                f"{DISPATCHER}: cannot measure the session floor (CLAUDE.md or "
-                f"{DYNAMIC_MD} unreadable)."
+                f"{DISPATCHER}: cannot measure the session floor (CLAUDE.md "
+                "unreadable)."
             )
         elif measured_session != session_floor:
             problems.append(
                 f"{DISPATCHER}: published session floor is {session_floor} but "
-                f"dispatcher floor + CLAUDE.md + {DYNAMIC_MD} measures "
-                f"{measured_session}. Re-measure and update the docstring and "
-                f"{DYNAMIC_MD} together."
+                f"dispatcher floor + CLAUDE.md measures {measured_session}. "
+                "Re-measure and update the docstring."
             )
     return problems
 
@@ -1599,13 +1557,10 @@ def check_no_audit_id_comments(src: Source) -> tuple[list[str], list[str]]:
 # Derived analytically from the dispatcher's own tables (same primitives as
 # _measured_range_problems above) rather than a hand re-count, so a new
 # _BASH_KEYWORD_RULES row or registry alias updates the live numbers
-# automatically. DYNAMIC.md deliberately does NOT restate these numbers (it
-# points at rules_dispatcher.py's docstring instead, to keep its own token
-# footprint down) — do not add a DYNAMIC_MD entry here unless DYNAMIC.md's
-# prose is made to cite a number again; an entry whose regex can never match
-# passes silently and gives no real coverage (this happened once already,
-# 2026-08-19, when the prose it matched was trimmed in the same commit that
-# added the pattern — see test_every_alias_count_pattern_matches below).
+# automatically. An entry here whose regex can never match passes silently
+# and gives no real coverage (this happened once already, 2026-08-19, when
+# the prose it matched was trimmed in the same commit that added the pattern
+# — see test_every_alias_count_pattern_matches below).
 
 _ALIAS_COUNT_PATTERNS = {
     "CLAUDE.md": {
