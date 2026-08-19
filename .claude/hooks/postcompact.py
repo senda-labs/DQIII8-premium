@@ -5,15 +5,16 @@ Re-injects the minimum operational baseline after context compaction.
 
 Fires AFTER context-mode finishes compaction.
 Restores: active model, active project, next step, audit score (only if
-pending) — see "Injection rules" comment below. Reads precompact_state.json
-written by precompact.py to recover previous state. Always exits 0 — never
-abort.
+pending) — see "Injection rules" comment below. Reads the session-scoped
+tasks/precompact_state_{session_id}.json written by precompact.py to
+recover previous state, then deletes it. Always exits 0 — never abort.
 """
 
 import json
 import logging
 import logging.handlers
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -21,7 +22,18 @@ from pathlib import Path
 
 JARVIS = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
 DB = JARVIS / "database" / "dqiii8.db"
-STATE_FILE = JARVIS / "tasks" / "precompact_state.json"
+
+# Rango 2 fix (2026-08-19 red-team audit) — mirrors precompact.py's
+# per-session state file. The lookup key MUST come from this hook's own
+# stdin session_id, never from the state file's own recorded session_id —
+# trusting the file's content to find itself is exactly how the old shared
+# tasks/precompact_state.json leaked one session's state into another's.
+_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _state_file_for(session_id: str) -> Path:
+    safe_id = _SAFE_ID_RE.sub("_", session_id)[:128] or "unknown"
+    return JARVIS / "tasks" / f"precompact_state_{safe_id}.json"
 
 _log = logging.getLogger("dqiii8.postcompact")
 if not _log.handlers:
@@ -41,16 +53,28 @@ try:
 except Exception:
     data = {}
 
+# ── Session id — from THIS hook's own stdin (same pattern as
+# session_start.py / subagent_start.py / precompact.py), needed BEFORE
+# we can locate the session-scoped state file below. Deriving it from
+# the state file's own contents instead — as this hook used to do — is
+# exactly what let one session's PostCompact read another's state.
+session_id = data.get("session_id", os.environ.get("CLAUDE_SESSION_ID", "?"))
+STATE_FILE = _state_file_for(session_id)
+
 # ── Recover pre-compact state ────────────────────────────────────────
 pre_state: dict = {}
 try:
     if STATE_FILE.exists():
         pre_state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        # Best-effort cleanup: this file's only reader is this hook, and
+        # it has just been read — leaving it around only accumulates one
+        # stale file per compact event, forever, in tasks/.
+        try:
+            STATE_FILE.unlink()
+        except OSError:
+            pass
 except Exception as e:
     _log.warning("pre-compact state unreadable: %s", e)
-
-# ── Session id (needed by project resolution below) ──────────────────
-session_id = pre_state.get("session_id", os.environ.get("CLAUDE_SESSION_ID", "?"))
 
 # ── Active project ───────────────────────────────────────────────────
 # DQIII8_PROJECT env var has no writer — resolve via the DB-backed SSOT instead.
