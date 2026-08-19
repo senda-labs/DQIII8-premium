@@ -68,10 +68,13 @@ AGENT_TYPE_MAP = {
 resolved_name = AGENT_TYPE_MAP.get(agent_type, agent_type or "claude-sonnet-5")
 
 # ── Worktree isolation ───────────────────────────────────────────────────────
-WORKTREE_AGENTS = {"code-reviewer", "python-specialist", "orchestrator"}
+# Rango 3 (P0, 2026-08-19 red-team audit): parallel agents writing directly on
+# the shared main tree with no isolation was a genuine data-race risk. User
+# decision: worktree mandatory for every agent type, not just the 3 that
+# previously opted in — every dispatched subagent with an agent_id now gets one.
 worktree_path = ""
 
-if resolved_name in WORKTREE_AGENTS and agent_id:
+if agent_id:
     DQIII8_ROOT = os.environ.get("DQIII8_ROOT", "/root/dqiii8")
     wt_dir = f"/tmp/dqiii8-wt/{agent_id}"
     branch = f"wt-{agent_id}"

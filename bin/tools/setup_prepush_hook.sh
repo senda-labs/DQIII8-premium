@@ -21,13 +21,18 @@ set -e
 # DQIII8 pre-push safety net (Rango 1, 2026-08-19 red-team audit): pre-commit's
 # gitleaks gate only covers commits made through a session where that hook was
 # installed and not bypassed (--no-verify). This is a second, independent scan
-# over every commit actually about to leave the machine, at push time.
+# over every commit actually about to leave the machine, at push time —
+# secrets (gitleaks) AND BLOCKED_PATHS filenames (check_blocked_paths_diff.py,
+# added after the 2026-08-19 decision to also catch a secret-less placeholder
+# credential file gitleaks' pattern match would miss).
 #
 # Known gap (documented, not silently assumed covered): this hook cannot see
 # pushes made via the GitHub API (e.g. mcp__github__push_files) — those never
 # invoke local git hooks at all — nor a push run with --no-verify. Neither is
-# closable from a local git hook; they need a server-side check (e.g. GitHub
-# push protection / a repo-level secret scan) to be fully covered.
+# closable from a local git hook; closed instead via GitHub's own server-side
+# secret scanning + push protection, enabled on the repo directly (2026-08-19
+# decision) — see docs/audits/2026-08-19-context-injection-redteam.md.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
 zero="0000000000000000000000000000000000000000"
 while read -r local_ref local_sha remote_ref remote_sha; do
     [ "$local_sha" = "$zero" ] && continue  # deleting a remote ref — nothing to scan
@@ -38,6 +43,8 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     fi
     echo "[pre-push] scanning ${log_opts} for secrets before push to ${remote_ref}..."
     gitleaks detect --source . --log-opts="${log_opts}" --redact --exit-code 1 --config .gitleaks.toml
+    echo "[pre-push] scanning ${log_opts} for BLOCKED_PATHS before push to ${remote_ref}..."
+    python3 "${REPO_ROOT}/bin/tools/check_blocked_paths_diff.py" "${log_opts}"
 done
 EOF
 chmod +x "${HOOK_PATH}"
