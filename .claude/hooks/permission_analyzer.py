@@ -602,6 +602,72 @@ def _mask_sql_literals(cmd: str) -> str:
     return "".join(out)
 
 
+# 2026-08-20 (A5). Ver _mask_quotes_for_readonly.
+_READONLY_COMMANDS = frozenset(
+    {
+        "grep",
+        "egrep",
+        "fgrep",
+        "rg",
+        "ag",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "sort",
+        "uniq",
+        "cut",
+        "nl",
+        "diff",
+        "comm",
+        "rev",
+        "strings",
+        "basename",
+        "dirname",
+    }
+)
+_FIRST_WORD_RE = re.compile(r"^\s*([\w./-]+)")
+# Encadenar invalida la afirmacion: solo se analiza un comando suelto.
+_CHAINING_RE = re.compile(r"&&|\|\||[;|\n]")
+
+
+def _has_unquoted_chaining(cmd: str) -> bool:
+    """¿Hay un separador de comandos FUERA de comillas?
+
+    Mirarlo sobre el texto crudo seria el mismo error de rol que este parche
+    corrige: el `|` de `grep 'x >| y' f` esta dentro del patron, no separa nada.
+    Si las comillas no casan no hay spans y se mira todo -> conservador.
+    """
+    spans = [m.span() for m in _QUOTED_SPAN_RE.finditer(cmd)]
+    return any(
+        not any(start <= m.start() and m.end() <= end for start, end in spans)
+        for m in _CHAINING_RE.finditer(cmd)
+    )
+
+
+def _mask_quotes_for_readonly(cmd: str) -> str:
+    """CMD con el interior de sus literales neutralizado si el ejecutable no escribe.
+
+    Solo para decidir SI el comando escribe. La deteccion de credenciales y de
+    rutas sigue leyendo el comando original: esto no amplia lo que se puede
+    tocar, solo deja de inventarse una redireccion donde hay un patron de
+    busqueda.
+    """
+    if _OPAQUE_SHELL_RE.search(cmd) or _has_unquoted_chaining(cmd):
+        return cmd
+    head = _FIRST_WORD_RE.match(cmd)
+    if not head or head.group(1).rsplit("/", 1)[-1] not in _READONLY_COMMANDS:
+        return cmd
+    spans = [m.span() for m in _QUOTED_SPAN_RE.finditer(cmd)]
+    if not spans:
+        return cmd
+    out = list(cmd)
+    for start, end in spans:
+        for i in range(start + 1, end - 1):
+            out[i] = "x"
+    return "".join(out)
+
+
 def _collapse_adjacent_quotes(cmd: str) -> str:
     """Collapse Bash's directly-adjacent-quote string concatenation.
 
@@ -2207,7 +2273,7 @@ class PermissionAnalyzer:
         """
         _copy_only_dests = None
         # A4: `WHERE id > 1` dentro del literal SQL no es una redireccion.
-        is_write = _bash_write_sign_hit(_mask_sql_literals(cmd))
+        is_write = _bash_write_sign_hit(_mask_quotes_for_readonly(_mask_sql_literals(cmd)))
         if not is_write:
             # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
             if re.search(r"\b(?:sqlite3|psql|mysql|mariadb)\b", cmd):

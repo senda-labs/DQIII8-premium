@@ -3667,22 +3667,24 @@ MD = "/root/dqiii8/CLAU" + "DE.md"
         "python3 -m pytest tests/test_permission_analyzer.py -q 2>&1",
         f"ls -la {MD} 2>/dev/null",
         'echo \'{"tool_name":"Bash"}\' | python3 .claude/hooks/pre_tool_use.py',
-        # A1 stops here on purpose. A quoted ">" and a heredoc are OPAQUE shapes:
-        # the analysis cannot account for every redirection in them, and what it
-        # cannot account for it does not narrow — the lesson of Phase B's three
-        # bypasses. Fixing these needs per-segment destination attribution
-        # (A2/A3), never a wider notion of "inert".
-        pytest.param(
-            "grep -n \"'>'\" /root/dqiii8/.claude/hooks/permission_analyzer.py",
-            marks=pytest.mark.xfail(
-                reason="A1 does not narrow a quoted '>': opaque shape, A2/A3 debt.",
-                strict=True,
-            ),
-        ),
+        # A5 (2026-08-20) closed the quoted-">" case: the executable is a pure
+        # reader, so a redirection operator inside its quotes cannot redirect.
+        "grep -n \"'>'\" /root/dqiii8/.claude/hooks/permission_analyzer.py",
+        # The heredoc stays xfail, and not for lack of trying. Approving it needs
+        # a rule that declares the BODY inert, and the body is Python handed to an
+        # interpreter that writes files. A deliberately generous deny-list
+        # (open/write/os/import/exec/__/...) was built and attacked: it failed in
+        # both directions — it does not even approve this body (`->` contains
+        # `>`), and 5 of 6 attacks walked through it (`breakpoint()`, `vars()`,
+        # base64, unicode homoglyphs, name splicing). Enumerating dangerous forms
+        # in a Turing-complete language is the game Phase B lost three times.
         pytest.param(
             f"python3 - <<'PY'\nprint('{MD} -> ok')\nPY",
             marks=pytest.mark.xfail(
-                reason="A1 does not narrow heredocs: opaque shape, A2/A3 debt.",
+                reason=(
+                    "A heredoc body is code for a writer; no decidable inertness "
+                    "rule survives attack. Deliberately unfixed, not pending."
+                ),
                 strict=True,
             ),
         ),
@@ -3939,6 +3941,59 @@ def test_quoted_sql_is_not_shell_syntax(sql):
     ],
 )
 def test_sql_exemption_opens_nothing(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] in ("DENY", "ESCALATE"), r
+
+
+# ── A5 (2026-08-20) — a quoted operator is not syntax if the executable can't write ──
+# `grep -n "'>'" .claude/hooks/permission_analyzer.py` escalated as a write to the
+# governance corpus. Generalises A4 beyond DB clients: a single command whose
+# executable is a pure reader cannot redirect, so operators inside its quotes are
+# search patterns. The mask feeds only the write-signal — credential detection
+# still reads the command untouched.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "grep -n \"'>'\" /root/dqiii8/.claude/hooks/permission_analyzer.py",
+        "rg -n '>' /root/dqiii8/CLAUDE.md",
+        "grep -n '>>' /root/dqiii8/.claude/settings.json",
+        "head -5 'a > b' /root/dqiii8/CLAUDE.md",
+        "grep -n '2>&1' /root/dqiii8/.claude/rules/00_core_behavior.md",
+        # the `|` lives inside the pattern, so it separates nothing
+        "grep -n 'x >| y' /root/dqiii8/CLAUDE.md",
+    ],
+)
+def test_quoted_operator_for_a_reader_is_not_a_write(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] == "APPROVE", r
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # the redirect is outside the quotes: real
+        "grep -n x /tmp/a > /root/dqiii8/CLAUDE.md",
+        "cat /tmp/x > /root/dqiii8/CLAUDE.md",
+        "head -5 /tmp/a >> /root/dqiii8/.claude/settings.json",
+        # chaining voids the claim, so nothing is masked
+        "grep -n '>' /tmp/a && echo y > /root/dqiii8/CLAUDE.md",
+        "grep -n '>' /tmp/a && awk '{print > \"/root/dqiii8/CLAUDE.md\"}' /tmp/b",
+        # writers are deliberately outside the reader list
+        "awk '{print > \"/root/dqiii8/CLAUDE.md\"}' /tmp/a",
+        "sed -i 's/a/b/' /root/dqiii8/CLAUDE.md",
+        "tee /root/dqiii8/CLAUDE.md < /tmp/x",
+        "xargs -I{} sh -c 'echo x > /root/dqiii8/CLAUDE.md' < /tmp/l",
+        # shells and interpreters re-parse what is quoted
+        "bash -c 'echo x > /root/dqiii8/CLAUDE.md'",
+        "python3 -c \"open('/root/dqiii8/CLAUDE.md','w')\"",
+        # credential detection is untouched by the mask — including inside quotes
+        "grep -n x /root/dqiii8/.env",
+        "grep -n x '/root/dqiii8/.env'",
+        "cat '.e*'",
+        "grep -rn 'x' /root/dqiii8/.claude/hooks && cp /tmp/evil /root/dqiii8/.claude/settings.json",
+    ],
+)
+def test_reader_exemption_opens_nothing(cmd):
     r = analyzer.evaluate("Bash", {"command": cmd})
     assert r["decision"] in ("DENY", "ESCALATE"), r
 
