@@ -419,6 +419,31 @@ def _governance_path_hit(path: str) -> str | None:
 # Shell metacharacters used to split a Bash command into path-like tokens.
 _BASH_TOKEN_SPLIT_RE = re.compile(r"""[\s'"();|&<>=`,]+""")
 
+# 2026-08-20 (A2): flags cuyo argumento es un patron de EXCLUSION. Ver
+# _is_glob_exclusion_argument.
+_EXCLUSION_FLAGS = frozenset({"--exclude", "--exclude-dir", "--exclude-from", "--ignore"})
+_PATH_PREDICATES = frozenset({"-path", "-ipath", "-wholename", "-iwholename", "-name", "-iname"})
+_NEGATORS = frozenset({"-not", "!"})
+
+
+def _is_glob_exclusion_argument(prev: list[str]) -> bool:
+    """True si el token es el patron de una exclusion, no un operando leido.
+
+    `find . -name "*.tmp" -not -path "./.git/*"` se denegaba como
+    bash_credential_glob: el basename de `./.git/*` es `*`, que casa con
+    `id_rsa`. Pero ese patron EXCLUYE — solo puede quitar rutas de lo que el
+    comando toca, nunca anadir la credencial.
+
+    Deliberadamente NO cubre inclusiones sueltas (`-name` sin negar): ahi el
+    patron si designa lo que el comando alcanza, y `find . -name ".e*" -exec cat
+    {} +` tiene que seguir denegando.
+    """
+    if not prev:
+        return False
+    if prev[-1] in _EXCLUSION_FLAGS:
+        return True
+    return len(prev) >= 2 and prev[-1] in _PATH_PREDICATES and prev[-2] in _NEGATORS
+
 
 def _credential_hit(path: str) -> str | None:
     """Return the credential token a path touches, or None.
@@ -1073,6 +1098,73 @@ _BLOB_ALNUM_RE = re.compile(r"^[A-Za-z0-9]+$")
 # interactive editors, and curl/wget's own output-to-file flags, all of
 # which write without any of ">"/"tee"/"truncate" appearing.
 _BASH_WRITE_SIGNS = [">", ">>", "tee ", "sed -i", "truncate "]
+
+# 2026-08-20 (A1): el ">" de _BASH_WRITE_SIGNS es un substring, asi que
+# `2>/dev/null`, `2>&1` y `>&2` marcaban como ESCRITURA cualquier lectura que
+# los llevara — y el comando heredaba entonces el veredicto de cualquier ruta
+# protegida que solo estuviera mencionando (`grep x .claude/hooks/stop.py
+# 2>/dev/null` -> ESCALATE). Una redireccion a /dev/null o a un descriptor no
+# escribe ningun fichero que un chequeo de rutas pueda proteger.
+#
+# ADITIVO, NUNCA SUSTITUTIVO: esto solo retira la señal derivada de ">". Los
+# demas signos de la lista, y las tres capas independientes de deteccion de
+# escritura de mas abajo (cp/mv/rsync/install/ln/dd; patch/git apply/git
+# checkout --/tar -x/unzip/ed; _BASH_WRITE_SIGN_PATTERNS) siguen intactas — por
+# eso `cp x <gobernanza> 2>/dev/null` sigue escalando.
+_INERT_REDIR_TARGETS = ("/dev/null",)
+_OPAQUE_SHELL_RE = re.compile(r"\$\(|`|<<|\$\{|\beval\b|\b(?:ba|z|k|da)?sh\s+-[a-zA-Z]*c\b")
+
+
+def _redirections_all_inert(cmd: str) -> bool:
+    """True solo si se puede dar cuenta de cada ">" y ninguno escribe un fichero.
+
+    Conservador por construccion: ante cualquier duda devuelve False, que deja
+    el comportamiento anterior. Nunca amplia lo que se considera inerte.
+    """
+    if _OPAQUE_SHELL_RE.search(cmd) or cmd.count("'") % 2 or cmd.count('"') % 2:
+        return False
+    i, n, seen = 0, len(cmd), False
+    while i < n:
+        if cmd[i] != ">":
+            i += 1
+            continue
+        seen = True
+        j = i + 1
+        if j < n and cmd[j] == ">":
+            j += 1
+        while j < n and cmd[j] in " \t":
+            j += 1
+        if j < n and cmd[j] == "&":
+            # dup de descriptor (`2>&1`, `>&2`, `2>&-`): se resuelve aparte
+            # porque "&" es tambien separador de comandos, asi que el barrido
+            # de token de abajo lo cortaria a cadena vacia.
+            k = j + 1
+            while k < n and cmd[k].isdigit():
+                k += 1
+            if k == j + 1:
+                if k < n and cmd[k] == "-":
+                    k += 1
+                else:
+                    return False  # `>&fichero` escribe de verdad
+            i = k
+            continue
+        k = j
+        while k < n and cmd[k] not in " \t|;&\n":
+            k += 1
+        if cmd[j:k] not in _INERT_REDIR_TARGETS:
+            return False
+        i = k
+    return seen
+
+
+def _bash_write_sign_hit(cmd: str) -> bool:
+    if any(sign in cmd for sign in _BASH_WRITE_SIGNS if sign not in (">", ">>")):
+        return True
+    if ">" not in cmd:
+        return False
+    return not _redirections_all_inert(cmd)
+
+
 _BASH_WRITE_SIGN_PATTERNS = [
     re.compile(r"\bsed\b[^|;&\n]*\s(?:-i|--in-place)\b"),
     re.compile(r"\bperl\b[^|;&\n]*\s-\w*i\w*\b"),
@@ -2005,9 +2097,14 @@ class PermissionAnalyzer:
         # from the raw command. `cmd` itself is untouched; every other check
         # in this function still sees the original string.
         _cred_cmd = _collapse_adjacent_quotes(cmd)
+        _recent: list[str] = []
         for tok in _BASH_TOKEN_SPLIT_RE.split(_cred_cmd):
             tok = tok.strip().strip("'\"")
-            if not tok or tok.startswith("-"):
+            if not tok:
+                continue
+            _prev = _recent[-2:]
+            _recent.append(tok)
+            if tok.startswith("-"):
                 continue
             hit = _credential_hit(tok)
             if hit:
@@ -2023,7 +2120,7 @@ class PermissionAnalyzer:
             # match, but it can still be crafted to expand onto a known
             # credential file. Ask the reverse question via fnmatch.
             glob_hit = _credential_glob_hit(tok)
-            if glob_hit:
+            if glob_hit and not _is_glob_exclusion_argument(_prev):
                 return self._deny(
                     tool,
                     cmd,
@@ -2034,7 +2131,7 @@ class PermissionAnalyzer:
                     "Reference the file explicitly, or use os.environ.get() for secrets.",
                 )
         # 2. All BLOCKED_PATHS — block write operations
-        is_write = any(sign in cmd for sign in _BASH_WRITE_SIGNS)
+        is_write = _bash_write_sign_hit(cmd)
         if not is_write:
             # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
             if re.search(r"\b(?:sqlite3|psql|mysql|mariadb)\b", cmd):

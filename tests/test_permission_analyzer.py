@@ -3651,7 +3651,7 @@ def test_breakglass_glob_probe_follows_the_same_verdict(monkeypatch):
     assert _pa._governance_glob_hit("CLAUD?.md") is None
 
 
-# ── Phase B (2026-08-20) — redirect operator/target association ─────────────
+# ── A1 (2026-08-20) — redirect operator/target association ──────────────────
 # `is_write` used to be a substring test for ">" over the whole command, and
 # once true EVERY path-shaped token became a write target. Operator-anywhere x
 # protected-path-anywhere denied read-only commands. These are the real shapes
@@ -3665,18 +3665,27 @@ MD = "/root/dqiii8/CLAU" + "DE.md"
     [
         "python3 -m pytest tests/test_permission_analyzer.py -q 2>&1",
         f"ls -la {MD} 2>/dev/null",
-        "grep -n \"'>'\" /root/dqiii8/.claude/hooks/permission_analyzer.py",
         'echo \'{"tool_name":"Bash"}\' | python3 .claude/hooks/pre_tool_use.py',
-        f"python3 - <<'PY'\nprint('{MD} -> ok')\nPY",
+        # A1 stops here on purpose. A quoted ">" and a heredoc are OPAQUE shapes:
+        # the analysis cannot account for every redirection in them, and what it
+        # cannot account for it does not narrow — the lesson of Phase B's three
+        # bypasses. Fixing these needs per-segment destination attribution
+        # (A2/A3), never a wider notion of "inert".
+        pytest.param(
+            "grep -n \"'>'\" /root/dqiii8/.claude/hooks/permission_analyzer.py",
+            marks=pytest.mark.xfail(
+                reason="A1 does not narrow a quoted '>': opaque shape, A2/A3 debt.",
+                strict=True,
+            ),
+        ),
+        pytest.param(
+            f"python3 - <<'PY'\nprint('{MD} -> ok')\nPY",
+            marks=pytest.mark.xfail(
+                reason="A1 does not narrow heredocs: opaque shape, A2/A3 debt.",
+                strict=True,
+            ),
+        ),
     ],
-)
-@pytest.mark.xfail(
-    reason="Phase B reverted 2026-08-20 after /panel-review found 3 bypasses "
-    "(nested shell, command substitution, quoted heredoc delimiter). These "
-    "false positives are known, accepted debt until a redesign lands: narrow "
-    "ONLY for an allowlist of provably-simple commands, never a blocklist of "
-    "dangerous shapes.",
-    strict=False,
 )
 def test_readonly_command_with_redirect_noise_is_not_a_write(cmd):
     """A redirect elsewhere in the command must not make every path a target."""
@@ -3720,6 +3729,54 @@ def test_readonly_command_with_redirect_noise_is_not_a_write(cmd):
 def test_real_redirect_write_to_protected_path_still_caught(cmd, decision):
     r = analyzer.evaluate("Bash", {"command": cmd})
     assert r["decision"] == decision, r
+
+
+# ── A2 (2026-08-20) — an exclusion pattern is not evidence of access ─────────
+# `_credential_glob_hit` reduces a token to its basename, so `./.git/*` became
+# `*`, which fnmatch-matches `id_rsa`. But that pattern EXCLUDES: it can only
+# remove paths from what the command touches.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        'find . -name "*.tmp" -not -path "./.git/*"',
+        "find . -name *.tmp -not -path ./.git/*",
+        'find . -type f ! -path "./node_modules/*"',
+        'grep -rn "x" bin/ --exclude "*"',
+        # excluding a credential pattern cannot expose it either
+        'find . -not -path "./.env*"',
+    ],
+)
+def test_glob_in_exclusion_predicate_is_not_credential_evidence(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] == "APPROVE", r
+
+
+# Every A2 narrowing gets its adversarial twin. These are the reason A2 covers
+# exclusions ONLY: an inclusion predicate really does designate what the command
+# reads, and a wildcard operand really can expand onto a credential.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # `*` does not match dotfiles in bash, but it does match id_rsa
+        "cat *",
+        "ls src/*",
+        # `.` is literal here, so these genuinely reach .env
+        "cat .*",
+        "cat .e*",
+        "cp .e* /tmp/",
+        'bash -c "cat .e*"',
+        "cat /root/.ssh/*",
+        # inclusion, not exclusion: -exec reads exactly what the pattern matched
+        'find . -name ".e*" -exec cat {} +',
+        'find . -name "*" -exec cat {} +',
+        # A2 exempts the GLOB check only — a literal credential inside an
+        # exclusion still denies, deliberately conservative
+        'find . -not -path "./.ssh/id_rsa"',
+    ],
+)
+def test_credential_reaching_glob_still_denied_after_a2(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] == "DENY", r
 
 
 # The three bypasses /panel-review probed live against the Phase B narrowing,
