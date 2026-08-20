@@ -3779,6 +3779,58 @@ def test_credential_reaching_glob_still_denied_after_a2(cmd):
     assert r["decision"] == "DENY", r
 
 
+# ── A3b (2026-08-20) — a path being READ is not a write destination ──────────
+# `_bash_resolved_write_targets` offers the raw command as a candidate, so a
+# governance path anywhere in a `cp` line matched — including as the SOURCE.
+GOV_FILE = ".claude/hooks/stop.py"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        f"cp {GOV_FILE} /tmp/copia.py",
+        "cp -r /root/dqiii8/.claude/hooks /tmp/sandbox",
+        f"install {GOV_FILE} /tmp/x",
+        f"ln -s {GOV_FILE} /tmp/enlace",
+        f"cp -t /tmp {GOV_FILE}",
+    ],
+)
+def test_copy_source_is_not_a_write_target(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] == "APPROVE", r
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # destination in the protected corpus is still a write
+        f"cp /tmp/evil {GOV_FILE}",
+        "cp /tmp/evil .claude/settings.json",
+        "cp -t .claude/hooks /tmp/evil",
+        "install /tmp/evil .claude/hooks/x.py",
+        "ln -s /tmp/evil .claude/hooks/x.py",
+        # mv and rsync are deliberately outside A3b: they modify the source too
+        f"mv {GOV_FILE} /tmp/x",
+        f"rsync -a {GOV_FILE} /tmp/x",
+        # a second write signal means the destination no longer describes the
+        # command, so the narrowing must not apply
+        f"cp {GOV_FILE} /tmp/x && echo y > CLAUDE.md",
+        # opaque forms keep the previous behaviour
+        "cp /tmp/evil $(printf .claude/settings.json)",
+        # the pre-existing hole this closes: inside `bash -c '...'` the copier
+        # followed no separator, is_write never fired, and the write to a
+        # blocked path was APPROVED
+        "bash -c 'cp /tmp/evil .claude/settings.json'",
+        "bash -c 'cp /tmp/evil CLAUDE.md'",
+        "sh -c 'mv /tmp/evil .claude/settings.json'",
+        "eval 'cp /tmp/evil .claude/settings.json'",
+    ],
+)
+def test_copy_destination_in_protected_corpus_still_caught(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] in ("DENY", "ESCALATE"), r
+
+
 # The three bypasses /panel-review probed live against the Phase B narrowing,
 # kept as permanent regression tests against the reverted baseline. Any future
 # attempt to narrow write targets must keep these green — they are the concrete

@@ -756,7 +756,47 @@ def _protected_paths_matching(pattern: str) -> list[str]:
     return hits
 
 
-def _bash_resolved_write_targets(cmd: str) -> list[str]:
+# 2026-08-20 (A3b). Ver _copy_family_destinations. `mv` y `rsync` quedan FUERA a
+# proposito: `mv` borra el origen y `rsync --remove-source-files` tambien, asi
+# que en ellos el origen si es una escritura y no puede dejar de atribuirse.
+_COPY_FAMILY_RE = re.compile(r"^(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|install|ln)\b")
+_COPY_TARGET_DIR_FLAGS = ("-t", "--target-directory")
+_CMD_SEPARATOR_RE = re.compile(r"[;|\n&]")
+
+
+def _copy_family_destinations(cmd: str) -> list[str] | None:
+    """Los operandos de DESTINO de un copiador de shell simple, o None.
+
+    None significa "no se puede afirmar cual es el destino" y conserva el
+    comportamiento anterior (todo el comando es candidato). Solo se estrecha una
+    forma demostrablemente simple: una sola invocacion, sin separadores de
+    comando, sin sustitucion, heredoc, shell anidada ni comilla sin cerrar.
+    """
+    if _OPAQUE_SHELL_RE.search(cmd) or cmd.count("'") % 2 or cmd.count('"') % 2:
+        return None
+    if _CMD_SEPARATOR_RE.search(cmd):
+        return None
+    collapsed = _collapse_adjacent_quotes(cmd).strip()
+    if not _COPY_FAMILY_RE.match(collapsed):
+        return None
+    toks = [t for t in (x.strip().strip("'\"") for x in _BASH_TOKEN_SPLIT_RE.split(collapsed)) if t]
+    operands = []
+    i = 2 if toks[0] == "sudo" else 1
+    while i < len(toks):
+        tok = toks[i]
+        if tok in _COPY_TARGET_DIR_FLAGS:
+            return toks[i + 1 : i + 2] or None
+        if tok.startswith("-t") and tok != "-t":
+            return None  # `-tDIR` pegado: el destino no es el ultimo operando
+        if tok.startswith("-"):
+            i += 1
+            continue
+        operands.append(tok)
+        i += 1
+    return operands[-1:] or None
+
+
+def _bash_resolved_write_targets(cmd: str, restrict_to: list[str] | None = None) -> list[str]:
     """Strings to test against BLOCKED_PATHS/GOVERNANCE_PATHS for a Bash
     write: the raw command (cheap, catches the common case), the quote/
     backslash-collapsed command ('CLA''UDE.md' / 'CLA\\UDE.md'
@@ -767,11 +807,16 @@ def _bash_resolved_write_targets(cmd: str) -> list[str]:
     collapsed = _collapse_adjacent_quotes(cmd)
     cwd = _bash_effective_cwd(collapsed)
     assigns = _shell_assignments(collapsed)
-    out = [cmd, collapsed]
-    out.extend(_archive_dest_dirs(collapsed))
+    # A3b: con restrict_to, el comando crudo deja de ser candidato — el llamante
+    # ya ha determinado que lo unico que se escribe es ese destino.
+    out = [] if restrict_to is not None else [cmd, collapsed]
+    if restrict_to is None:
+        out.extend(_archive_dest_dirs(collapsed))
     for raw_tok in _BASH_TOKEN_SPLIT_RE.split(collapsed):
         tok = raw_tok.strip().strip("'\"")
         if not tok or tok.startswith("-"):
+            continue
+        if restrict_to is not None and tok not in restrict_to:
             continue
         if "$" in tok:
             tok = _expand_shell_vars(tok, assigns)
@@ -2131,6 +2176,7 @@ class PermissionAnalyzer:
                     "Reference the file explicitly, or use os.environ.get() for secrets.",
                 )
         # 2. All BLOCKED_PATHS — block write operations
+        _copy_only_dests = None
         is_write = _bash_write_sign_hit(cmd)
         if not is_write:
             # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
@@ -2208,18 +2254,28 @@ class PermissionAnalyzer:
             # `sudo cp`, `/bin/cp`, a second line after `\n`, or `dd of=...`
             # (found by stress test, 2026-08-11 — first pass covered only the
             # bare unprefixed, single-line case).
-            if (
-                re.search(
-                    r"(?:^|[;&|\n]\s*)(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b",
-                    cmd,
-                    re.MULTILINE,
-                )
-                or re.search(r"\bdd\s+(?:\S+\s+)*of=", cmd)
+            _shell_copy = re.search(
+                # Las comillas cuentan como inicio: sin ellas, `bash -c 'cp x
+                # <blocked>'` no activaba is_write y se APROBABA (agujero
+                # preexistente, medido 2026-08-20). La shell anidada reejecuta
+                # su argumento como codigo, asi que ahi si empieza un comando.
+                r"(?:^|[;&|\n'\"]\s*)(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b",
+                cmd,
+                re.MULTILINE,
+            )
+            _other_copy = (
+                re.search(r"\bdd\s+(?:\S+\s+)*of=", cmd)
                 or re.search(r"\bshutil\.(?:copy\w*|move)\s*\(", cmd)
                 or re.search(r"\bos\.(?:replace|rename)\s*\(", cmd)
                 or re.search(r"\.write_(?:text|bytes)\s*\(", cmd)
-            ):
+            )
+            if _shell_copy or _other_copy:
                 is_write = True
+                # A3b: si la unica señal es un copiador de shell simple, lo que
+                # se escribe es su destino. Con cualquier otra señal presente el
+                # destino ya no basta para describir el comando.
+                if _shell_copy and not _other_copy:
+                    _copy_only_dests = _copy_family_destinations(cmd)
         if not is_write:
             # 2026-08-18: write primitives that reach a target path
             # without any shell write operator or a name matched above —
@@ -2258,7 +2314,7 @@ class PermissionAnalyzer:
             # `cd /root/dqiii8/.claude && echo x > settings.json` (the
             # blocked token never appears literally) and quote/backslash
             # splicing (`CLA''UDE.md`, `CLA\UDE.md`).
-            _targets = _bash_resolved_write_targets(cmd)
+            _targets = _bash_resolved_write_targets(cmd, _copy_only_dests)
             blocked = next((h for h in (_blocked_path_hit(t) for t in _targets) if h), None)
             if blocked:
                 return self._deny(
