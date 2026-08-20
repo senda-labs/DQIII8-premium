@@ -123,12 +123,8 @@ class Source:
             names = result.stdout.split() if result.returncode == 0 else []
         else:
             base = self.root / subdir
-            names = [
-                str(p.relative_to(self.root)) for p in base.rglob("*.md") if p.is_file()
-            ]
-        return sorted(
-            n for n in names if not any(n.startswith(x) for x in MD_SCAN_EXCLUDE)
-        )
+            names = [str(p.relative_to(self.root)) for p in base.rglob("*.md") if p.is_file()]
+        return sorted(n for n in names if not any(n.startswith(x) for x in MD_SCAN_EXCLUDE))
 
     def list_governance_md(self) -> list[str]:
         """Every markdown file in governance scope: `.claude/**` plus the
@@ -166,9 +162,7 @@ class Source:
         else:
             base = self.root / AGENTS_DIR
             names = (
-                [str(p.relative_to(self.root)) for p in base.glob("*.md")]
-                if base.is_dir()
-                else []
+                [str(p.relative_to(self.root)) for p in base.glob("*.md")] if base.is_dir() else []
             )
         return {Path(n).stem for n in names}
 
@@ -404,7 +398,9 @@ def check_token_budget(src: Source) -> tuple[list[str], list[str]]:
     if hp_text is None:
         problems.append(f"cannot read {HOOKS_PERMS_MD}")
     else:
-        stray = _RANGE.findall(hp_text) + _CANON_FLOOR.findall(hp_text) + _CANON_CEIL.findall(hp_text)
+        stray = (
+            _RANGE.findall(hp_text) + _CANON_FLOOR.findall(hp_text) + _CANON_CEIL.findall(hp_text)
+        )
         if stray:
             problems.append(
                 f"{HOOKS_PERMS_MD}: must NOT restate the token range "
@@ -431,10 +427,7 @@ _CEILING_PROBES = (
     ),
     (
         "Edit",
-        {
-            "file_path": "/root/dqiii8/database/.claude/hooks/"
-            "openrouter_wrapper_domain_agent.py"
-        },
+        {"file_path": "/root/dqiii8/database/.claude/hooks/" "openrouter_wrapper_domain_agent.py"},
         "edit-hooks-tiering-db-py",
     ),
 )
@@ -565,7 +558,9 @@ def _measured_range_problems(
 
     measured_ceiling, label = _measured_ceiling(rd)
     if measured_ceiling != ceiling:
-        direction = "stale-high (an inflated budget claim)" if measured_ceiling < ceiling else "exceeded"
+        direction = (
+            "stale-high (an inflated budget claim)" if measured_ceiling < ceiling else "exceeded"
+        )
         problems.append(
             f"{DISPATCHER}: docstring ceiling is {ceiling} but the maximum "
             f"reachable injection ('{label}') measures {measured_ceiling} — "
@@ -587,8 +582,7 @@ def _measured_range_problems(
         measured_session = _session_floor(rd, src.root)
         if measured_session is None:
             problems.append(
-                f"{DISPATCHER}: cannot measure the session floor (CLAUDE.md "
-                "unreadable)."
+                f"{DISPATCHER}: cannot measure the session floor (CLAUDE.md " "unreadable)."
             )
         elif measured_session != session_floor:
             problems.append(
@@ -709,10 +703,22 @@ def check_agent_names_exist(src: Source) -> tuple[list[str], list[str]]:
 # Only backticked code spans: a slug is a configuration value, and every rule
 # file in this repo already writes them as `provider/model`. Bare prose is not
 # scanned — the false-positive rate on "and/or", dates and paths is far too high.
-_SLUG = re.compile(r"`([A-Za-z0-9][A-Za-z0-9_.\-]*/[A-Za-z0-9][A-Za-z0-9_.\-]*(?::[A-Za-z0-9_.\-]+)?)`")
+_SLUG = re.compile(
+    r"`([A-Za-z0-9][A-Za-z0-9_.\-]*/[A-Za-z0-9][A-Za-z0-9_.\-]*(?::[A-Za-z0-9_.\-]+)?)`"
+)
 _PATHISH_SUFFIX = (
-    ".py", ".md", ".json", ".sh", ".sql", ".toml", ".yaml", ".yml", ".txt", ".db",
-    ".flag", ".conf",
+    ".py",
+    ".md",
+    ".json",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".txt",
+    ".db",
+    ".flag",
+    ".conf",
 )
 # Lines that explicitly document a slug as dead/wrong are citing it in order to
 # warn about it. Requiring such a slug to exist in code would be backwards.
@@ -925,8 +931,10 @@ def _dir_has_any_file(src: Source, dirpath: str) -> bool:
     """
     # Staged mode: git pathspec `*` crosses directory separators (unlike a
     # worktree glob), so `dirpath/*` alone already matches recursively.
-    return len(_glob_paths(src, f"{dirpath}/*")) > 0 if src.staged else (
-        (src.root / dirpath).is_dir() and any((src.root / dirpath).iterdir())
+    return (
+        len(_glob_paths(src, f"{dirpath}/*")) > 0
+        if src.staged
+        else ((src.root / dirpath).is_dir() and any((src.root / dirpath).iterdir()))
     )
 
 
@@ -1098,9 +1106,7 @@ def check_readme_counts(src: Source) -> tuple[list[str], list[str]]:
 
 # ── check 6: file-path citations ─────────────────────────────────────────────
 
-_BACKTICK_PATH = re.compile(
-    r"`((?:[\w.\-]+/)+[\w.\-]+\.(?:md|py|json|sh|sql|toml|ya?ml|txt|db))`"
-)
+_BACKTICK_PATH = re.compile(r"`((?:[\w.\-]+/)+[\w.\-]+\.(?:md|py|json|sh|sql|toml|ya?ml|txt|db))`")
 
 
 def _path_citation_exists(src: Source, path_str: str) -> bool:
@@ -1118,6 +1124,39 @@ def _path_citation_exists(src: Source, path_str: str) -> bool:
         return False
     rel = str(candidate.relative_to(src.root))
     return src._staged_file_exists(rel) if src.staged else candidate.is_file()
+
+
+def _citation_is_expectedly_absent(src: Source, path_str: str) -> bool:
+    """True when a missing citation is provably not evidence of drift.
+
+    Measured 2026-08-20: 16 of 19 warnings were these two classes, which buried
+    the 3 real hits. A signal that is 84% noise gets skimmed and then ignored,
+    so filtering them makes the check *more* useful, not laxer.
+
+      - filename templates (`sessions/YYYY-MM-DD_session.md`) name a pattern,
+        never a file, so no repo state could satisfy them;
+      - paths gitignored by design (`tasks/todo.md`) are created at runtime and
+        absent from a clean tree on purpose.
+
+    Deliberately does NOT filter the third class the docstring below names —
+    "this was deleted" historical notes. Those really are indistinguishable
+    from a stale citation by regex, so they stay warn-only.
+    """
+    if "YYYY" in path_str:
+        return True
+    try:
+        return (
+            subprocess.run(
+                ["git", "-C", str(src.root), "check-ignore", "-q", path_str],
+                capture_output=True,
+                timeout=5,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.SubprocessError):
+        # Not a git tree (pytest fixture root): keep the pre-2026-08-20
+        # behaviour rather than silently suppressing a real warning.
+        return False
 
 
 def check_file_citations_exist(src: Source) -> tuple[list[str], list[str]]:
@@ -1150,10 +1189,10 @@ def check_file_citations_exist(src: Source) -> tuple[list[str], list[str]]:
             continue
         for m in _BACKTICK_PATH.finditer(text):
             path_str = m.group(1)
-            if not _path_citation_exists(src, path_str):
-                warnings.append(
-                    f"{rel}: cites `{path_str}`, which does not exist in this repo."
-                )
+            if not _path_citation_exists(src, path_str) and not _citation_is_expectedly_absent(
+                src, path_str
+            ):
+                warnings.append(f"{rel}: cites `{path_str}`, which does not exist in this repo.")
 
     return problems, warnings
 
@@ -1220,9 +1259,7 @@ def _parity_body(text: str) -> list[str]:
     """Substantive lines only: no YAML frontmatter, no blank lines, no
     blockquote annotations (the `> **SSOT: ...**` cross-reference convention is
     metadata about the duplication, not part of the procedure)."""
-    return [
-        s for ln in _split_frontmatter(text)[1] if (s := ln.strip()) and not s.startswith(">")
-    ]
+    return [s for ln in _split_frontmatter(text)[1] if (s := ln.strip()) and not s.startswith(">")]
 
 
 def _pointer_body(text: str) -> list[str]:
@@ -1517,9 +1554,7 @@ GITLEAKS_HOOK_SETUP = "bin/tools/setup_gitleaks_hook.sh"
 # re-derived from scratch. Every instance found this way was rewritten to
 # state its reason directly instead. A ruff lint-suppression code is excluded
 # below so this doesn't misfire on ordinary `noqa` comments — see `_NOQA_CODE`.
-_AUDIT_ID = re.compile(
-    r"\b(?:RC\d[\d.]*|INV\d+|SEC\d+|Gap \d+|Phase \d+ of|F\d+)\b"
-)
+_AUDIT_ID = re.compile(r"\b(?:RC\d[\d.]*|INV\d+|SEC\d+|Gap \d+|Phase \d+ of|F\d+)\b")
 _NOQA_CODE = re.compile(r"noqa:\s*F\d+")
 
 

@@ -244,6 +244,10 @@ tmp/
 temp/
 *.tmp
 *.bak
+# Los patchers de gobernanza dejan sufijos con nombre (.bak-patchJ, .bak-breakglass…),
+# que `*.bak` no captura: sin esto, un `git add -A` commitea copias de
+# permission_analyzer.py y settings.json (2026-08-20, 12 ficheros en el arbol).
+*.bak-*
 *.backup
 
 # Build outputs

@@ -22,10 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 JARVIS = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
-DB_PATH = JARVIS / "database" / "dqiii8_knowledge.db"
-for _d in [
-    JARVIS / "bin" / s for s in ["", "core", "agents", "monitoring", "tools", "ui"]
-]:
+CHAT_DB_PATH = JARVIS / "database" / "dqiii8_knowledge.db"
+for _d in [JARVIS / "bin" / s for s in ["", "core", "agents", "monitoring", "tools", "ui"]]:
     if str(_d) not in sys.path:
         sys.path.insert(0, str(_d))
 
@@ -43,6 +41,7 @@ from db import get_db
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from bin.core.logging_config import get_logger as _get_logger
+
 log = _get_logger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────
 HOST = os.environ.get("DQIII8_DASHBOARD_HOST", "127.0.0.1")
@@ -70,8 +69,7 @@ def detect_claude_oauth() -> dict:
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 if any(
-                    data.get(k)
-                    for k in ("token", "access_token", "sessionKey", "claudeApiKey")
+                    data.get(k) for k in ("token", "access_token", "sessionKey", "claudeApiKey")
                 ):
                     return {
                         "available": True,
@@ -83,9 +81,7 @@ def detect_claude_oauth() -> dict:
 
     # 2) Check CLI is installed
     try:
-        v = subprocess.run(
-            ["claude", "--version"], capture_output=True, text=True, timeout=5
-        )
+        v = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
         if v.returncode != 0:
             return {"available": False, "method": None, "plan": None}
         version_str = v.stdout.strip().split("\n")[0]
@@ -154,9 +150,7 @@ def _load_env_dict() -> dict:
 def _write_env_key(key: str, value: str) -> None:
     """Safely update or append a single key in .env."""
     env_file = JARVIS / ".env"
-    lines = (
-        env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
-    )
+    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
     written = False
     output = []
     for line in lines:
@@ -443,10 +437,7 @@ async def recent_sessions(limit: int = 20, auth: bool = Depends(check_auth)):
             (limit,),
         ).fetchall()
 
-    return [
-        {"id": r[0], "start": r[1], "end": r[2], "status": r[3], "actions": r[4]}
-        for r in rows
-    ]
+    return [{"id": r[0], "start": r[1], "end": r[2], "status": r[3], "actions": r[4]} for r in rows]
 
 
 @app.get("/api/tasks/recent")
@@ -484,14 +475,11 @@ async def production_metrics(auth: bool = Depends(check_auth)):
     """Per-project agent-compute and human-hours metrics for the Produccion tab."""
     _my_projects = JARVIS / "my-projects"
     known_projects = (
-        {p.name for p in _my_projects.iterdir() if p.is_dir()}
-        if _my_projects.is_dir()
-        else set()
+        {p.name for p in _my_projects.iterdir() if p.is_dir()} if _my_projects.is_dir() else set()
     )
 
     with get_db() as conn:
-        agent_rows = conn.execute(
-            """
+        agent_rows = conn.execute("""
             SELECT project,
                    COUNT(*) as actions,
                    SUM(CASE WHEN duration_ms IS NOT NULL THEN 1 ELSE 0 END) as duration_covered,
@@ -500,17 +488,14 @@ async def production_metrics(auth: bool = Depends(check_auth)):
             FROM agent_actions
             WHERE project IS NOT NULL
             GROUP BY project
-            """
-        ).fetchall()
+            """).fetchall()
 
-        human_rows = conn.execute(
-            """
+        human_rows = conn.execute("""
             SELECT project,
                    SUM((julianday(COALESCE(ended_at, 'now')) - julianday(started_at)) * 1440) as minutes
             FROM human_hours
             GROUP BY project
-            """
-        ).fetchall()
+            """).fetchall()
 
     projects: dict = {}
     unrecognized_agent: list = []
@@ -838,7 +823,7 @@ async def chat_stream(request: Request, auth: bool = Depends(check_auth)):
 
 def _persist_chat(session_id: str, user_msg: str, assistant_msg: str) -> None:
     """Write chat turn to DB. Creates tables if missing (graceful on older schemas)."""
-    db = DB_PATH
+    db = CHAT_DB_PATH
     if not db.exists():
         return
     try:
@@ -876,7 +861,7 @@ def _persist_chat(session_id: str, user_msg: str, assistant_msg: str) -> None:
 @app.get("/api/chat/history")
 async def chat_history(limit: int = 10, auth: bool = Depends(check_auth)):
     """Return last N sessions with first user message as preview."""
-    db = DB_PATH
+    db = CHAT_DB_PATH
     if not db.exists():
         return []
     try:
@@ -896,9 +881,7 @@ async def chat_history(limit: int = 10, auth: bool = Depends(check_auth)):
         conn.close()
     except Exception:
         rows = []
-    return [
-        {"id": r[0], "created_at": r[1], "preview": (r[2] or "")[:60]} for r in rows
-    ]
+    return [{"id": r[0], "created_at": r[1], "preview": (r[2] or "")[:60]} for r in rows]
 
 
 @app.post("/api/upload")
@@ -949,7 +932,7 @@ async def search_chat(q: str = "", limit: int = 20, auth: bool = Depends(check_a
     """Search chat sessions by content. Returns sessions matching the query."""
     if not q.strip():
         return []
-    db = DB_PATH
+    db = CHAT_DB_PATH
     if not db.exists():
         return []
     try:
@@ -971,15 +954,13 @@ async def search_chat(q: str = "", limit: int = 20, auth: bool = Depends(check_a
         conn.close()
     except Exception:
         rows = []
-    return [
-        {"id": r[0], "created_at": r[1], "preview": (r[2] or "")[:60]} for r in rows
-    ]
+    return [{"id": r[0], "created_at": r[1], "preview": (r[2] or "")[:60]} for r in rows]
 
 
 @app.post("/api/chat/{session_id}/delete")
 async def delete_chat_session(session_id: str, auth: bool = Depends(check_auth)):
     """Delete a chat session and its messages."""
-    db = DB_PATH
+    db = CHAT_DB_PATH
     if not db.exists():
         return {"ok": False, "error": "DB not found"}
     try:
@@ -996,7 +977,7 @@ async def delete_chat_session(session_id: str, auth: bool = Depends(check_auth))
 @app.get("/api/chat/{session_id}/messages")
 async def chat_session_messages(session_id: str, auth: bool = Depends(check_auth)):
     """Return all messages for a given session."""
-    db = DB_PATH
+    db = CHAT_DB_PATH
     if not db.exists():
         return []
     try:
@@ -1050,9 +1031,7 @@ async def get_tiers(auth: bool = Depends(check_auth)):
     env = _load_env_dict()
     oauth = detect_claude_oauth()
     has_groq = bool(env.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY"))
-    has_anthropic = bool(
-        env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    )
+    has_anthropic = bool(env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY"))
 
     return {
         "tiers": [
@@ -1086,10 +1065,7 @@ async def get_tiers(auth: bool = Depends(check_auth)):
                 "label": "Claude",
                 "description": "Claude Sonnet via OAuth or API key",
                 "available": oauth["available"] or has_anthropic,
-                "cost": oauth["available"]
-                and not has_anthropic
-                and "$0 (Pro plan)"
-                or "$3/Mtok",
+                "cost": oauth["available"] and not has_anthropic and "$0 (Pro plan)" or "$3/Mtok",
                 "model": "claude-sonnet-5",
                 "method": (
                     oauth["method"]
@@ -1123,9 +1099,7 @@ async def claude_status(auth: bool = Depends(check_auth)):
 async def settings_page(request: Request):
     """Settings UI page."""
     if REQUIRE_AUTH:
-        token = request.query_params.get("token", "") or request.cookies.get(
-            "dq_token", ""
-        )
+        token = request.query_params.get("token", "") or request.cookies.get("dq_token", "")
         if not token or not verify_token(token):
             return HTMLResponse(content=LOGIN_HTML, status_code=401)
     html = _load_html(SETTINGS_HTML_PATH, _SETTINGS_FALLBACK)
@@ -1140,9 +1114,7 @@ async def get_settings(auth: bool = Depends(check_auth)):
     return {
         "groq_key": _mask_key(env.get("GROQ_API_KEY", "")),
         "anthropic_key": _mask_key(env.get("ANTHROPIC_API_KEY", "")),
-        "default_tier": env.get(
-            "DQ_DEFAULT_TIER", os.environ.get("DQ_DEFAULT_TIER", "auto")
-        ),
+        "default_tier": env.get("DQ_DEFAULT_TIER", os.environ.get("DQ_DEFAULT_TIER", "auto")),
         "oauth": oauth,
         "tier_options": ["auto", "groq-only", "groq+ollama", "ollama-only"],
     }
@@ -1173,9 +1145,7 @@ async def update_settings(request: Request, auth: bool = Depends(check_auth)):
 async def dashboard_page(request: Request):
     """Main dashboard page."""
     if REQUIRE_AUTH:
-        token = request.query_params.get("token", "") or request.cookies.get(
-            "dq_token", ""
-        )
+        token = request.query_params.get("token", "") or request.cookies.get("dq_token", "")
         if not token or not verify_token(token):
             return HTMLResponse(content=LOGIN_HTML, status_code=401)
     return HTMLResponse(content=DASHBOARD_HTML)

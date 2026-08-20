@@ -76,6 +76,9 @@ BLOCKED_PATHS = [
     "/root/.bashrc",
     "/root/.bash_profile",
     "/root/.profile",
+    # Break-glass sentinel (see below). In this list so an agent cannot
+    # create it and self-authorise the downgrade it controls.
+    "/root/.dqiii8-breakglass",
 ]
 
 # ── Governance paths ────────────────────────────────────────────────────────
@@ -100,6 +103,42 @@ GOVERNANCE_PATHS = [
     ".claude/skills/",
     ".claude/settings.local.json",
 ]
+
+# ── Break-glass (2026-08-20) ────────────────────────────────────────────────
+# CLAUDE.md and .claude/settings.json are hard-DENY above, with no in-band
+# operator override -- so a settings.json that breaks the session cannot be
+# repaired from inside a session at all. The sentinel is the out-of-band
+# authorisation: a human creates it in a shell (an agent cannot -- the sentinel
+# path is itself in BLOCKED_PATHS), which downgrades those two tokens from DENY
+# to ESCALATE on every route (Edit/Write, MCP, Bash, glob probes). ESCALATE is
+# still blocked on the wire and still routed to the operator; it never becomes
+# an auto-approve, and no other BLOCKED_PATHS token is affected.
+#
+# Resolved through a predicate rather than by mutating GOVERNANCE_PATHS, so a
+# test can force either state (monkeypatch _BREAKGLASS_CACHE). The mutating
+# version made the whole suite depend on a file in /root and left the ARMED
+# state untestable.
+BREAKGLASS_SENTINEL = Path("/root/.dqiii8-breakglass")
+BREAKGLASS_DOWNGRADE = ("CLAUDE.md", ".claude/settings.json")
+
+_BREAKGLASS_CACHE: bool | None = None
+
+
+def _breakglass_active() -> bool:
+    """Sentinel state, resolved once per process (hooks are one-shot)."""
+    global _BREAKGLASS_CACHE
+    if _BREAKGLASS_CACHE is None:
+        try:
+            _BREAKGLASS_CACHE = BREAKGLASS_SENTINEL.is_file()
+        except OSError:
+            _BREAKGLASS_CACHE = False  # fail closed: tokens stay hard-DENY
+    return _BREAKGLASS_CACHE
+
+
+def _downgraded() -> tuple[str, ...]:
+    """BLOCKED_PATHS tokens currently downgraded to ESCALATE."""
+    return BREAKGLASS_DOWNGRADE if _breakglass_active() else ()
+
 
 # Paths where even READ is dangerous (credential exfiltration risk).
 # Literal fast-path tokens only; the authoritative matcher is _credential_hit()
@@ -138,11 +177,11 @@ _CREDENTIAL_TEMPLATE_RE = re.compile(r"\.(?:example|sample|template|dist)$", re.
 # alembic/022_wallet_pass_secrets.py, SECRETPOWER.yaml) stay readable.
 _CREDENTIAL_BASENAME_RE = re.compile(
     r"^(?:"
-    r".*\.env(?:\..+)?"          # .env, .env.local, prod.env, config/app.env
-    r"|\.credentials\.json"      # OAuth credential store
-    r"|id_rsa.*|id_ed25519.*"    # private keys (and their .pub siblings)
-    r"|\.secrets"                # dotfile secret store
-    r"|.*secrets?\.json"         # client_secret.json, youtube_client_secret.json
+    r".*\.env(?:\..+)?"  # .env, .env.local, prod.env, config/app.env
+    r"|\.credentials\.json"  # OAuth credential store
+    r"|id_rsa.*|id_ed25519.*"  # private keys (and their .pub siblings)
+    r"|\.secrets"  # dotfile secret store
+    r"|.*secrets?\.json"  # client_secret.json, youtube_client_secret.json
     r"|.+\.(?:pem|key|p12|pfx)"  # X.509 / PKCS#12 key material
     r")$",
     re.IGNORECASE,
@@ -187,17 +226,19 @@ _MCP_FS_READONLY_SUFFIXES = {
 # plural key that this tuple never matched, so a multi-file credential read
 # via that one tool was invisible to every path-based check below.
 _MCP_PATH_KEYS = (
-    "file_path", "path", "source", "destination", "target", "dest",
-    "paths", "file_paths",
+    "file_path",
+    "path",
+    "source",
+    "destination",
+    "target",
+    "dest",
+    "paths",
+    "file_paths",
 )
 
 # SQLite statements that name a filesystem path directly.
-_SQL_ATTACH_RE = re.compile(
-    r"""\bATTACH\s+(?:DATABASE\s+)?['"]([^'"]+)['"]""", re.IGNORECASE
-)
-_SQL_VACUUM_INTO_RE = re.compile(
-    r"""\bVACUUM\s+INTO\s+['"]([^'"]+)['"]""", re.IGNORECASE
-)
+_SQL_ATTACH_RE = re.compile(r"""\bATTACH\s+(?:DATABASE\s+)?['"]([^'"]+)['"]""", re.IGNORECASE)
+_SQL_VACUUM_INTO_RE = re.compile(r"""\bVACUUM\s+INTO\s+['"]([^'"]+)['"]""", re.IGNORECASE)
 # Best-effort catch-all for a path-shaped string literal anywhere in the query
 # (readfile()/writefile() extensions, .import targets, or an ATTACH spelled in
 # a form the two patterns above miss). Deliberately a heuristic, not a parser:
@@ -265,9 +306,7 @@ def _candidate_paths(tool: str, tool_input: dict) -> list[str]:
         # mcp__filesystem__ only. Read-shaped suffixes (get_*/list_*/search_*)
         # are exempt; anything else fails closed, same policy as the
         # filesystem server above (settings.json allows the whole mcp__* glob).
-        if tool.startswith("mcp__github__") and not suffix.startswith(
-            ("get_", "list_", "search_")
-        ):
+        if tool.startswith("mcp__github__") and not suffix.startswith(("get_", "list_", "search_")):
             for key in _MCP_PATH_KEYS:
                 val = inp.get(key)
                 if isinstance(val, str) and val:
@@ -357,9 +396,10 @@ def _blocked_path_hit(path: str) -> str | None:
     *also* matches a genuine deny token (e.g. `.claude/rules/secrets.md` hitting
     "secrets") still denies — DENY wins whenever the two lists disagree.
     """
+    down = _downgraded()
     for cand in _path_match_candidates(path):
         for blocked in BLOCKED_PATHS:
-            if blocked in GOVERNANCE_PATHS:
+            if blocked in GOVERNANCE_PATHS or blocked in down:
                 continue
             if blocked in cand:
                 return blocked
@@ -370,10 +410,11 @@ def _governance_path_hit(path: str) -> str | None:
     """The GOVERNANCE_PATHS token a path matches, or None."""
     for cand in _path_match_candidates(path):
         normalized = cand.replace("\\", "/")
-        for gov in GOVERNANCE_PATHS:
+        for gov in (*GOVERNANCE_PATHS, *_downgraded()):
             if gov in normalized:
                 return gov
     return None
+
 
 # Shell metacharacters used to split a Bash command into path-like tokens.
 _BASH_TOKEN_SPLIT_RE = re.compile(r"""[\s'"();|&<>=`,]+""")
@@ -444,10 +485,21 @@ def _glob_filter_hit(spec: str) -> str | None:
 # pattern), so credential detection for a glob-shaped token instead asks the
 # reverse question: does this pattern match a name we know is sensitive?
 _CREDENTIAL_GLOB_PROBES = (
-    ".env", ".env.local", ".env.production", ".credentials.json",
-    "id_rsa", "id_ed25519", ".secrets", "secrets.json",
-    "client_secret.json", "server.pem", "server.key", "cert.p12", "cert.pfx",
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".credentials.json",
+    "id_rsa",
+    "id_ed25519",
+    ".secrets",
+    "secrets.json",
+    "client_secret.json",
+    "server.pem",
+    "server.key",
+    "cert.p12",
+    "cert.pfx",
 )
+
 
 def _credential_glob_hit(token: str) -> str | None:
     """Return the sensitive basename a Bash glob TOKEN would expand to, or None.
@@ -509,15 +561,14 @@ _OBFUSCATED_DECODE_PIPE_RE = re.compile(
 # copy: that helper's `\(.)-> \1` pass runs re.sub repeatedly and would mangle
 # `\xNN` into a single stray character before this ever sees it.
 _ANSI_C_QUOTE_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
-_ANSI_C_ESCAPE_RE = re.compile(
-    r"\\x([0-9A-Fa-f]{1,2})|\\u([0-9A-Fa-f]{4})|\\([0-7]{1,3})|\\e|\\n"
-)
+_ANSI_C_ESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{1,2})|\\u([0-9A-Fa-f]{4})|\\([0-7]{1,3})|\\e|\\n")
 
 
 def _decode_ansi_c_escapes(payload: str) -> str:
     """Best-effort decode of the escape forms Bash's $'...' honors that a
     hex/octal/obfuscated-command payload would actually use: \\xNN, \\NNN
     (octal), \\uNNNN, \\e, \\n. [S5]"""
+
     def _sub(m: re.Match) -> str:
         if m.group(1) is not None:
             return chr(int(m.group(1), 16))
@@ -547,9 +598,7 @@ def _ansi_c_decoded_cmd(raw_cmd: str) -> str | None:
 # `cd`, a subshell `(cd … && …)`, a newline separator, and the `cd` inside
 # `bash -c '…'`. The lookbehind keeps 'abcd foo' / '/usr/bin/cd' from
 # matching while allowing '(', quote, ';', '&&' and newline to precede it.
-_CD_CHDIR_RE = re.compile(
-    r"""(?<![\w./-])(?:cd|pushd)\s+("[^"]*"|'[^']*'|[^\s;&|)]+)"""
-)
+_CD_CHDIR_RE = re.compile(r"""(?<![\w./-])(?:cd|pushd)\s+("[^"]*"|'[^']*'|[^\s;&|)]+)""")
 
 
 def _bash_effective_cwd(cmd: str) -> str:
@@ -600,9 +649,7 @@ _UNZIP_DEST_RE = re.compile(
 #   cpio        -D/--directory   — extract mode, e.g. `cpio -idmv -D <dir>`
 #   pip install --target/-t      — writes arbitrary package files (including
 #                                  .py that later gets imported) into <dir>
-_SEVENZIP_DEST_RE = re.compile(
-    r"""\b7z[ar]?\b[^|;&\n]*?\s-o("[^"]*"|'[^']*'|[^\s;&|]+)"""
-)
+_SEVENZIP_DEST_RE = re.compile(r"""\b7z[ar]?\b[^|;&\n]*?\s-o("[^"]*"|'[^']*'|[^\s;&|]+)""")
 _BSDTAR_DEST_RE = re.compile(
     r"""\bbsdtar\b[^|;&\n]*?\s(?:-C|--directory)(?:=|\s+)("[^"]*"|'[^']*'|[^\s;&|]+)"""
 )
@@ -639,9 +686,7 @@ def _archive_dest_dirs(cmd: str) -> list[str]:
             tgt = m.group(1).strip().strip("'\"")
             if not tgt or tgt.startswith("-"):
                 continue
-            resolved = os.path.normpath(
-                tgt if tgt.startswith("/") else os.path.join(cwd, tgt)
-            )
+            resolved = os.path.normpath(tgt if tgt.startswith("/") else os.path.join(cwd, tgt))
             out.append(resolved)
             out.append(resolved.rstrip("/") + "/")
     return out
@@ -653,23 +698,16 @@ def _archive_dest_dirs(cmd: str) -> list[str]:
 # BLOCKED/GOVERNANCE token ever appeared. Static text substitution of
 # assignments found earlier in the same command string — nothing is executed,
 # no eval, no environment lookup.
-_SHELL_ASSIGN_RE = re.compile(
-    r"""(?:^|[\s;&|(])([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|)<>]*)"""
-)
+_SHELL_ASSIGN_RE = re.compile(r"""(?:^|[\s;&|(])([A-Za-z_]\w*)=("[^"]*"|'[^']*'|[^\s;&|)<>]*)""")
 _SHELL_VAR_REF_RE = re.compile(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)")
 
 
 def _shell_assignments(cmd: str) -> dict[str, str]:
-    return {
-        m.group(1): m.group(2).strip("'\"")
-        for m in _SHELL_ASSIGN_RE.finditer(cmd)
-    }
+    return {m.group(1): m.group(2).strip("'\"") for m in _SHELL_ASSIGN_RE.finditer(cmd)}
 
 
 def _expand_shell_vars(token: str, assigns: dict[str, str]) -> str:
-    return _SHELL_VAR_REF_RE.sub(
-        lambda m: assigns.get(m.group(1) or m.group(2), m.group(0)), token
-    )
+    return _SHELL_VAR_REF_RE.sub(lambda m: assigns.get(m.group(1) or m.group(2), m.group(0)), token)
 
 
 def _protected_paths_matching(pattern: str) -> list[str]:
@@ -746,9 +784,7 @@ def _bash_resolved_write_targets(cmd: str) -> list[str]:
             continue
         elif tok.startswith("$"):
             continue
-        resolved = os.path.normpath(
-            tok if tok.startswith("/") else os.path.join(cwd, tok)
-        )
+        resolved = os.path.normpath(tok if tok.startswith("/") else os.path.join(cwd, tok))
         out.append(resolved)
         # Directory entries in BLOCKED_PATHS/GOVERNANCE_PATHS carry a trailing
         # separator ('.git/', '.claude/hooks/') so they cannot match a
@@ -765,13 +801,31 @@ def _bash_resolved_write_targets(cmd: str) -> list[str]:
 # does a glob-shaped Bash token ('CLAUD?.md', '*.local.json') expand onto a
 # protected basename? Split into two probe sets, same DENY-wins-except-
 # settings.local.json precedence as _blocked_path_hit/_governance_path_hit.
-_BLOCKED_GLOB_PROBES = tuple(sorted({
-    p.rstrip("/").rsplit("/", 1)[-1]
-    for p in BLOCKED_PATHS if p.rstrip("/") and p not in GOVERNANCE_PATHS
-}))
-_GOVERNANCE_GLOB_PROBES = tuple(sorted({
-    p.rstrip("/").rsplit("/", 1)[-1] for p in GOVERNANCE_PATHS if p.rstrip("/")
-}))
+# Recomputed per call, not cached: a cached tuple would not see a test's
+# monkeypatch of _BREAKGLASS_CACHE. ~30 short strings; fnmatch dominates.
+def _blocked_glob_probes() -> tuple[str, ...]:
+    down = _downgraded()
+    return tuple(
+        sorted(
+            {
+                p.rstrip("/").rsplit("/", 1)[-1]
+                for p in BLOCKED_PATHS
+                if p.rstrip("/") and p not in GOVERNANCE_PATHS and p not in down
+            }
+        )
+    )
+
+
+def _governance_glob_probes() -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                p.rstrip("/").rsplit("/", 1)[-1]
+                for p in (*GOVERNANCE_PATHS, *_downgraded())
+                if p.rstrip("/")
+            }
+        )
+    )
 
 
 def _blocked_glob_hit(token: str) -> str | None:
@@ -781,7 +835,7 @@ def _blocked_glob_hit(token: str) -> str | None:
     if not token or not _GLOB_WILDCARD_RE.search(token):
         return None
     base = token.replace("\\", "/").rsplit("/", 1)[-1]
-    for probe in _BLOCKED_GLOB_PROBES:
+    for probe in _blocked_glob_probes():
         if probe and fnmatch.fnmatchcase(probe, base):
             return probe
     return None
@@ -793,7 +847,7 @@ def _governance_glob_hit(token: str) -> str | None:
     if not token or not _GLOB_WILDCARD_RE.search(token):
         return None
     base = token.replace("\\", "/").rsplit("/", 1)[-1]
-    for probe in _GOVERNANCE_GLOB_PROBES:
+    for probe in _governance_glob_probes():
         if probe and fnmatch.fnmatchcase(probe, base):
             return probe
     return None
@@ -893,7 +947,11 @@ def _host_egress_risk(host: str) -> tuple[str, str] | None:
     # "private" — the short-circuit let http://2852039166/ (169.254.169.254,
     # cloud metadata) downgrade from DENY to ESCALATE (found by stress test,
     # 2026-08-11).
-    _int_base = 16 if host.startswith("0x") else (8 if re.fullmatch(r"0[0-7]+", host) else (10 if host.isdigit() else None))
+    _int_base = (
+        16
+        if host.startswith("0x")
+        else (8 if re.fullmatch(r"0[0-7]+", host) else (10 if host.isdigit() else None))
+    )
     if _int_base is not None:
         try:
             host = str(ipaddress.ip_address(int(host, _int_base)))
@@ -1083,6 +1141,7 @@ def _rm_destructive_targets(cmd: str) -> list[str]:
                 hits.append(tgt)
     return hits
 
+
 # context-mode MCP server (2026-08-18): allow-listed in
 # settings.local.json, arbitrary sandboxed code/subprocess execution, and its
 # own tool descriptions actively steer callers here instead of Bash ("PREFER
@@ -1090,11 +1149,13 @@ def _rm_destructive_targets(cmd: str) -> list[str]:
 # through any Bash-equivalent check. ctx_fetch_and_index/ctx_search are read/
 # query-shaped by name and are deliberately left out — only the three
 # confirmed exec-capable tools are covered.
-_CTX_MODE_EXEC_TOOLS = frozenset({
-    "mcp__context-mode__ctx_execute",
-    "mcp__context-mode__ctx_execute_file",
-    "mcp__context-mode__ctx_batch_execute",
-})
+_CTX_MODE_EXEC_TOOLS = frozenset(
+    {
+        "mcp__context-mode__ctx_execute",
+        "mcp__context-mode__ctx_execute_file",
+        "mcp__context-mode__ctx_batch_execute",
+    }
+)
 
 
 def _ctx_mode_command_text(tool: str, inp: dict) -> str:
@@ -1169,8 +1230,7 @@ _PIPE_TO_SHELL_RE = re.compile(
 # _NETWORK_EGRESS_BASH_RE: -T/--upload-file, and -F/--form with an @-file
 # attachment (curl reads the file named after '@' and sends its bytes).
 _UPLOAD_FORM_RE = re.compile(
-    r"\bcurl\b[^|;\n]*\s(?:-T\b|--upload-file\b)"
-    r"|\bcurl\b[^|;\n]*\s(?:-F\b|--form\b)[^|;\n]*=@"
+    r"\bcurl\b[^|;\n]*\s(?:-T\b|--upload-file\b)" r"|\bcurl\b[^|;\n]*\s(?:-F\b|--form\b)[^|;\n]*=@"
 )
 # [S6] A local archive/compress/encode tool piped straight into a network
 # command — the compressed/encoded bytes never touch disk as a named file,
@@ -1286,9 +1346,7 @@ def _interpreter_socket_shell_hit(cmd: str) -> bool:
 # words and command names alike, so gating this on the token alone (rather
 # than the token plus a command-substitution argument) would false-positive
 # on unrelated commands that merely mention "host".
-_DNS_EXFIL_RE = re.compile(
-    r"\b(?:host|nslookup|dig)\b[^|;\n]*(?:\$\(|`)"
-)
+_DNS_EXFIL_RE = re.compile(r"\b(?:host|nslookup|dig)\b[^|;\n]*(?:\$\(|`)")
 # [RT12] os.system/os.popen hand a full shell command to the OS; pty.spawn
 # starts an interactive shell; eval/exec/compile run arbitrary Python source.
 # All four are execution primitives, not just write primitives — folded
@@ -1317,7 +1375,7 @@ def _py_inline_call_first_arg(cmd: str, paren_open_idx: int) -> str | None:
         i += 1
     if depth:
         return None
-    arg_blob = cmd[start:i - 1]
+    arg_blob = cmd[start : i - 1]
     # First top-level comma splits off the first argument.
     depth = 0
     for j, ch in enumerate(arg_blob):
@@ -1330,9 +1388,7 @@ def _py_inline_call_first_arg(cmd: str, paren_open_idx: int) -> str | None:
     return arg_blob.strip()
 
 
-_PY_STRING_LITERAL_RE = re.compile(
-    r"""^(?:r|b|rb|br)?(['"]).*\1$""", re.IGNORECASE | re.DOTALL
-)
+_PY_STRING_LITERAL_RE = re.compile(r"""^(?:r|b|rb|br)?(['"]).*\1$""", re.IGNORECASE | re.DOTALL)
 
 
 def _py_arg_is_resolvable(arg: str) -> bool:
@@ -1349,6 +1405,7 @@ def _py_arg_is_resolvable(arg: str) -> bool:
     if re.match(r"^(?:f|fr|rf)['\"]", arg, re.IGNORECASE):
         return False
     return bool(_PY_STRING_LITERAL_RE.match(arg))
+
 
 # Always CRITICAL regardless of mode.
 # The literal 'rm -rf /' entries are handled separately by
@@ -1379,7 +1436,9 @@ _CRITICAL_PATTERN_LABELS = {
     CRITICAL_PATTERNS[1]: "filesystem format (mkfs)",
     CRITICAL_PATTERNS[2]: "dd to/from a raw disk device",
     CRITICAL_PATTERNS[3]: "tee into a raw disk device",
-    CRITICAL_PATTERNS[4]: "disk-scrubbing tool (wipefs/parted/sfdisk/fdisk/blkdiscard/shred) on a raw device",
+    CRITICAL_PATTERNS[
+        4
+    ]: "disk-scrubbing tool (wipefs/parted/sfdisk/fdisk/blkdiscard/shred) on a raw device",
     CRITICAL_PATTERNS[5]: "redirect into a disk-by-id alias",
     CRITICAL_PATTERNS[6]: "fork bomb",
 }
@@ -1397,7 +1456,9 @@ _CRITICAL_PATTERN_LABELS = {
 # Best-effort regex, not a SQL parser — same stance as _SQL_PATHISH_RE above:
 # the well-known no-op predicate shapes are pattern-matched, nothing more.
 _SQL_TABLE_PREFIX = r"(?:[\"'`\[]?\w+[\"'`\]]?\s*\.\s*)?[\"'`\[]?"
-_PROTECTED_AUDIT_TABLES = r"(?:agent_actions|permission_decisions|session_memory|instincts|sqlite_master|sqlite_schema)"
+_PROTECTED_AUDIT_TABLES = (
+    r"(?:agent_actions|permission_decisions|session_memory|instincts|sqlite_master|sqlite_schema)"
+)
 _PROTECTED_MUTATION_TABLES = r"(?:learned_approvals|permission_decisions|agent_actions|instincts|sqlite_master|sqlite_schema)"
 # Predicates that bound nothing. Ordered most-specific-first so `WHERE 1=1`
 # never falls through to the bare-`WHERE 1` branch.
@@ -1407,19 +1468,22 @@ _SQL_PREDICATE_END = r"(?:\s*(?:;|--|/\*|\)|[\"'`]|$))"
 
 _SQL_TAUTOLOGY = (
     r"(?:"
-    r"[\"'`]?\s*1\s*[\"'`]?\s*(?:==|=)\s*[\"'`]?\s*1\s*[\"'`]?"   # 1=1, '1'='1', "1"="1"
-    r"|1\s*(?:<>|!=)\s*0"                                          # 1<>0, 1!=0
-    r"|TRUE\b"                                                     # WHERE TRUE
-    r"|(['\"])([^'\"]*)\1\s*=\s*\1\2\1"                            # 'a'='a' — same literal both sides
-    r"|\b(\w+)\s*=\s*\3\b"                                         # col = col
-    r"|1\s*(?:;|--|/\*|\)|$)"                                      # WHERE 1  (no column at all)
+    r"[\"'`]?\s*1\s*[\"'`]?\s*(?:==|=)\s*[\"'`]?\s*1\s*[\"'`]?"  # 1=1, '1'='1', "1"="1"
+    r"|1\s*(?:<>|!=)\s*0"  # 1<>0, 1!=0
+    r"|TRUE\b"  # WHERE TRUE
+    r"|(['\"])([^'\"]*)\1\s*=\s*\1\2\1"  # 'a'='a' — same literal both sides
+    r"|\b(\w+)\s*=\s*\3\b"  # col = col
+    r"|1\s*(?:;|--|/\*|\)|$)"  # WHERE 1  (no column at all)
     # Semantic no-ops (2026-08-18, round-4 gap). Each is anchored to the end of
     # the predicate (_SQL_PREDICATE_END) so it only fires when the shape *is*
     # the whole WHERE clause — `WHERE id > -1 AND agent='x'` is genuinely
     # bounded and must stay APPROVE.
-    r"|\w+\s+IS\s+NOT\s+NULL" + _SQL_PREDICATE_END                 # id IS NOT NULL — true for every PK row
-    + r"|\w+\s*(?:>=|>)\s*-\s*\d+" + _SQL_PREDICATE_END            # id > -1, id >= -999 — true for any non-negative id
-    + r"|\w+\s*(?:<>|!=)\s*-\s*\d+" + _SQL_PREDICATE_END           # id <> -1 — ditto
+    r"|\w+\s+IS\s+NOT\s+NULL"
+    + _SQL_PREDICATE_END  # id IS NOT NULL — true for every PK row
+    + r"|\w+\s*(?:>=|>)\s*-\s*\d+"
+    + _SQL_PREDICATE_END  # id > -1, id >= -999 — true for any non-negative id
+    + r"|\w+\s*(?:<>|!=)\s*-\s*\d+"
+    + _SQL_PREDICATE_END  # id <> -1 — ditto
     + r")"
 )
 # NOTE: the two branches above use backreferences, so _SQL_TAUTOLOGY may only
@@ -1448,7 +1512,9 @@ _SQL_TAUTOLOGY = (
 # function rather than a HIGH_RISK_PATTERNS entry because a regex cannot decide
 # whether `5>=5` is true.
 _SQL_LITERAL_COMPARE_RE = re.compile(
-    r"DELETE\s+FROM\s+" + _SQL_TABLE_PREFIX + _PROTECTED_AUDIT_TABLES
+    r"DELETE\s+FROM\s+"
+    + _SQL_TABLE_PREFIX
+    + _PROTECTED_AUDIT_TABLES
     + r"\b[\"'`\]]?\s+WHERE\s+(\d+)\s*(>=|<=|<>|!=|==|=|>|<)\s*(\d+)"
     + _SQL_PREDICATE_END,
     re.IGNORECASE,
@@ -1524,13 +1590,24 @@ HIGH_RISK_PATTERNS = [
     # agent_actions (2026-08-18): erasing `permission_decisions` erases the
     # forensic record of this very analyzer's denials *and* starves the
     # repeat-rejection loop-breaker that reads it.
-    (r"DELETE\s+FROM\s+" + _SQL_TABLE_PREFIX + _PROTECTED_AUDIT_TABLES + r"\b[\"'`\]]?(?!\s+WHERE)",
-     "delete_unbounded_audit_table"),
+    (
+        r"DELETE\s+FROM\s+"
+        + _SQL_TABLE_PREFIX
+        + _PROTECTED_AUDIT_TABLES
+        + r"\b[\"'`\]]?(?!\s+WHERE)",
+        "delete_unbounded_audit_table",
+    ),
     # ...and the same delete *with* a WHERE whose predicate is a tautology:
     # `WHERE 1=1` / `WHERE TRUE` / `WHERE 1` delete exactly the same rows as
     # no WHERE at all, and previously APPROVED.
-    (r"DELETE\s+FROM\s+" + _SQL_TABLE_PREFIX + _PROTECTED_AUDIT_TABLES + r"\b[\"'`\]]?\s+WHERE\s+" + _SQL_TAUTOLOGY,
-     "delete_tautology_audit_table"),
+    (
+        r"DELETE\s+FROM\s+"
+        + _SQL_TABLE_PREFIX
+        + _PROTECTED_AUDIT_TABLES
+        + r"\b[\"'`\]]?\s+WHERE\s+"
+        + _SQL_TAUTOLOGY,
+        "delete_tautology_audit_table",
+    ),
     # Any mutating verb against a governance/audit table. `01_database_mutations.md`
     # makes agent_actions/instincts append-only (DB triggers), and
     # learned_approvals/permission_decisions drive the permission decision
@@ -1539,8 +1616,13 @@ HIGH_RISK_PATTERNS = [
     # through bin/core/action_log.py, not raw SQL. sqlite_master/sqlite_schema
     # added 2026-08-18: writing the catalog directly rewrites the schema
     # (and drops triggers) without naming any protected table at all.
-    (r"\b(?:UPDATE|ALTER\s+TABLE|TRUNCATE\s+TABLE|REPLACE\s+INTO|INSERT\s+(?:OR\s+\w+\s+)?INTO)\s+"
-     + _SQL_TABLE_PREFIX + _PROTECTED_MUTATION_TABLES + r"\b", "mutate_protected_table"),
+    (
+        r"\b(?:UPDATE|ALTER\s+TABLE|TRUNCATE\s+TABLE|REPLACE\s+INTO|INSERT\s+(?:OR\s+\w+\s+)?INTO)\s+"
+        + _SQL_TABLE_PREFIX
+        + _PROTECTED_MUTATION_TABLES
+        + r"\b",
+        "mutate_protected_table",
+    ),
     # [S9c] CREATE TABLE ... AS SELECT ... FROM <protected table> copies a
     # protected table's rows into a brand-new, unprotected table — the
     # mutation verbs above only ever look at what comes right after
@@ -1548,11 +1630,24 @@ HIGH_RISK_PATTERNS = [
     # shape had no explicit matcher (only the incidental `*`-wildcard
     # heuristic below, which false-positives on unrelated globs and misses
     # an explicit column list).
-    (r"CREATE\s+TABLE\b[\s\S]*?\bAS\s+SELECT\b[\s\S]*?\bFROM\s+"
-     + _SQL_TABLE_PREFIX + _PROTECTED_MUTATION_TABLES + r"\b", "sql_create_table_as_select_protected"),
-    (r"CREATE\s+TABLE\b[\s\S]*?\bAS\s+SELECT\b[\s\S]*?\bFROM\s+"
-     + _SQL_TABLE_PREFIX + _PROTECTED_AUDIT_TABLES + r"\b", "sql_create_table_as_select_protected"),
-    (r"PRAGMA\s+writable_schema", "pragma_writable_schema"),  # flips SQLite's schema table writable — arbitrary catalog rewrite
+    (
+        r"CREATE\s+TABLE\b[\s\S]*?\bAS\s+SELECT\b[\s\S]*?\bFROM\s+"
+        + _SQL_TABLE_PREFIX
+        + _PROTECTED_MUTATION_TABLES
+        + r"\b",
+        "sql_create_table_as_select_protected",
+    ),
+    (
+        r"CREATE\s+TABLE\b[\s\S]*?\bAS\s+SELECT\b[\s\S]*?\bFROM\s+"
+        + _SQL_TABLE_PREFIX
+        + _PROTECTED_AUDIT_TABLES
+        + r"\b",
+        "sql_create_table_as_select_protected",
+    ),
+    (
+        r"PRAGMA\s+writable_schema",
+        "pragma_writable_schema",
+    ),  # flips SQLite's schema table writable — arbitrary catalog rewrite
     (r"chmod\s+(?:-[\w-]+\s+)*(?:777|a\+rwx)\s+/\S*", "chmod_777_root"),
     # git push --force / -f / --force-with-lease (2026-08-18). This module had
     # ZERO matchers for it: `permission_request.py` names it in its own
@@ -1586,21 +1681,34 @@ HIGH_RISK_PATTERNS = [
     # `--delete`/`-d` is deliberately NOT here: removing a stale remote branch
     # is routine and rewrites no history, and `test_r5_benign_push_still_
     # approved` pins it as APPROVE.
-    (r"\bgit\b(?:\s+-{1,2}[A-Za-z][^\s;&|]*(?:\s+[^\s;&|-][^\s;&|]*)?)*\s+push\b"
-     r"(?:(?:[^|;&\n]|\\\n)*?\s)?"
-     r"(?:--force-with-lease(?:=[^\s;&|]*)?|--force|--mirror"
-     r"|-[a-zA-Z]*f|\+[^\s;&|]+)"
-     r"(?=[\s;&|'\"()]|$)", "git_push_force"),
+    (
+        r"\bgit\b(?:\s+-{1,2}[A-Za-z][^\s;&|]*(?:\s+[^\s;&|-][^\s;&|]*)?)*\s+push\b"
+        r"(?:(?:[^|;&\n]|\\\n)*?\s)?"
+        r"(?:--force-with-lease(?:=[^\s;&|]*)?|--force|--mirror"
+        r"|-[a-zA-Z]*f|\+[^\s;&|]+)"
+        r"(?=[\s;&|'\"()]|$)",
+        "git_push_force",
+    ),
 ]
 
 # [S4] Branches whose deletion via `git push --delete`/`-d`/a `:<ref>` empty-
 # source refspec must DENY even though it carries no --force flag (the
 # force-push matcher above deliberately treats `--delete` as routine — it
 # is, for a throwaway feature branch, but not for one of these).
-PROTECTED_BRANCHES = frozenset({
-    "main", "master", "production", "release", "develop", "trunk",
-    "staging", "prod", "premium-main", "premium-full",
-})
+PROTECTED_BRANCHES = frozenset(
+    {
+        "main",
+        "master",
+        "production",
+        "release",
+        "develop",
+        "trunk",
+        "staging",
+        "prod",
+        "premium-main",
+        "premium-full",
+    }
+)
 _PROTECTED_BRANCH_PREFIXES = ("release/", "hotfix/")
 
 
@@ -1638,6 +1746,8 @@ def _git_push_deleted_ref(cmd: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
 # Rule ids [panel-review, P1]: each entry above carries its own stable id as
 # a (regex, rule_id) tuple, not a parallel dict keyed by position
 # (HIGH_RISK_PATTERNS[-1]). A positional key silently re-points itself every
@@ -1710,8 +1820,7 @@ DENIAL_HINTS: dict[str, str] = {
         "Or use export KEY=value in bash without touching the file."
     ),
     "blocked_path:schema_v2.sql": (
-        "Add the SQL migration in a new file: "
-        "database/migrations/YYYYMMDD_description.sql"
+        "Add the SQL migration in a new file: " "database/migrations/YYYYMMDD_description.sql"
     ),
     "blocked_path:CLAUDE.md": (
         "System instructions cannot be modified from code. "
@@ -1782,8 +1891,7 @@ DENIAL_HINTS: dict[str, str] = {
         "governance-escalated, so you cannot add it yourself."
     ),
     "budget_exceeded": (
-        "Split the objective into smaller subtasks. "
-        "Start a new session with j --autonomous"
+        "Split the objective into smaller subtasks. " "Start a new session with j --autonomous"
     ),
     "repeat_rejection": (
         "This action was rejected multiple times. "
@@ -1815,9 +1923,9 @@ class PermissionAnalyzer:
         # DENIED), `*.pyc` became `.pyc` (never equal to `foo.pyc`), and
         # `plugins/cache/` collapsed to a bare `cache` (approving
         # `<anything>/cache` — wider than documented).
-        allowed_names: set[str] = set()      # exact final path component
-        allowed_suffixes: set[str] = set()   # from `*.ext` globs
-        allowed_tails: set[str] = set()      # multi-component relative tails
+        allowed_names: set[str] = set()  # exact final path component
+        allowed_suffixes: set[str] = set()  # from `*.ext` globs
+        allowed_tails: set[str] = set()  # multi-component relative tails
         for tok in ALLOWED_DELETIONS:
             t = tok.strip().strip("/")
             if not t:
@@ -1832,7 +1940,7 @@ class PermissionAnalyzer:
                 allowed_names.add(t)
 
         targets: list[str] = []
-        for m in re.finditer(r'\brm\b((?:\s+-{1,2}[a-zA-Z]+)*)((?:\s+[^\s;&|]+)+)', cmd):
+        for m in re.finditer(r"\brm\b((?:\s+-{1,2}[a-zA-Z]+)*)((?:\s+[^\s;&|]+)+)", cmd):
             arg_blob = m.group(2)
             for arg in arg_blob.split():
                 if arg.startswith("-"):
@@ -1848,21 +1956,19 @@ class PermissionAnalyzer:
             # Absolute paths are only safe if they resolve inside a project dir
             if tgt.startswith("/"):
                 real_tgt = os.path.realpath(os.path.normpath(tgt))
-                if not any(real_tgt.startswith(os.path.realpath(safe)) for safe in SAFE_PROJECT_DIRS):
+                if not any(
+                    real_tgt.startswith(os.path.realpath(safe)) for safe in SAFE_PROJECT_DIRS
+                ):
                     return False
             norm = tgt.rstrip("/")
             last = norm.rsplit("/", 1)[-1]
             if last in allowed_names:
                 continue
             if any(
-                last.endswith(suffix) and len(last) > len(suffix)
-                for suffix in allowed_suffixes
+                last.endswith(suffix) and len(last) > len(suffix) for suffix in allowed_suffixes
             ):
                 continue
-            if any(
-                norm == tail or norm.endswith("/" + tail)
-                for tail in allowed_tails
-            ):
+            if any(norm == tail or norm.endswith("/" + tail) for tail in allowed_tails):
                 continue
             return False
         return True
@@ -1881,7 +1987,8 @@ class PermissionAnalyzer:
             pattern = r'(?:^|[\s\'">/=@:(`$])' + re.escape(cred) + r'(?:[\s\'"/=@:;|)(&<>`$]|$)'
             if re.search(pattern, cmd):
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     f"Credential path '{cred}' referenced in Bash — access blocked.",
                     "CRITICAL",
                     f"bash_credential_path:{cred}",
@@ -1905,7 +2012,8 @@ class PermissionAnalyzer:
             hit = _credential_hit(tok)
             if hit:
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     f"Credential path '{tok}' referenced in Bash — access blocked ('{hit}').",
                     "CRITICAL",
                     f"bash_credential_path:{hit}",
@@ -1917,7 +2025,8 @@ class PermissionAnalyzer:
             glob_hit = _credential_glob_hit(tok)
             if glob_hit:
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     f"Glob '{tok}' in Bash would match credential file "
                     f"'{glob_hit}' — access blocked.",
                     "CRITICAL",
@@ -1928,8 +2037,10 @@ class PermissionAnalyzer:
         is_write = any(sign in cmd for sign in _BASH_WRITE_SIGNS)
         if not is_write:
             # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
-            if re.search(r'\b(?:sqlite3|psql|mysql|mariadb)\b', cmd):
-                if re.search(r'\b(?:INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE)\b', cmd, re.IGNORECASE):
+            if re.search(r"\b(?:sqlite3|psql|mysql|mariadb)\b", cmd):
+                if re.search(
+                    r"\b(?:INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE)\b", cmd, re.IGNORECASE
+                ):
                     is_write = True
         if not is_write:
             # Detect python/perl writing inline (2026-08-18):
@@ -1939,22 +2050,31 @@ class PermissionAnalyzer:
             # treat it as Python context unconditionally instead of requiring
             # the token.
             cmd_lower = cmd.lower()
-            _py_context = tool in _CTX_MODE_EXEC_TOOLS or "python" in cmd_lower or "perl" in cmd_lower
+            _py_context = (
+                tool in _CTX_MODE_EXEC_TOOLS or "python" in cmd_lower or "perl" in cmd_lower
+            )
             if _py_context and "open(" in cmd:
                 is_write = any(q in cmd for q in ("'w'", '"w"', "'a'", '"a"', "'x'", '"x"'))
-            if not is_write and _py_context and (
-                "write_text(" in cmd or "write_bytes(" in cmd
-                or re.search(r'\bshutil\.(?:copy\w*|move|rmtree)\s*\(', cmd)
-                or re.search(r'\bos\.(?:remove|unlink|rmdir|rename|replace|truncate)\s*\(', cmd)
-                or re.search(r'\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(', cmd)
-                # [RT12] os.system/os.popen/pty.spawn hand a full shell
-                # command to the OS; eval/exec/compile run arbitrary Python.
-                # Both are strictly more powerful than a single file write,
-                # so they're folded into the same is_write path rather than
-                # a parallel blocklist — see the unresolvable-target
-                # ESCALATE immediately below for the part a target-path
-                # check alone can't cover.
-                or _INLINE_EXEC_RE.search(cmd)
+            if (
+                not is_write
+                and _py_context
+                and (
+                    "write_text(" in cmd
+                    or "write_bytes(" in cmd
+                    or re.search(r"\bshutil\.(?:copy\w*|move|rmtree)\s*\(", cmd)
+                    or re.search(r"\bos\.(?:remove|unlink|rmdir|rename|replace|truncate)\s*\(", cmd)
+                    or re.search(
+                        r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(", cmd
+                    )
+                    # [RT12] os.system/os.popen/pty.spawn hand a full shell
+                    # command to the OS; eval/exec/compile run arbitrary Python.
+                    # Both are strictly more powerful than a single file write,
+                    # so they're folded into the same is_write path rather than
+                    # a parallel blocklist — see the unresolvable-target
+                    # ESCALATE immediately below for the part a target-path
+                    # check alone can't cover.
+                    or _INLINE_EXEC_RE.search(cmd)
+                )
             ):
                 is_write = True
             # [RT12] A literal inline-exec argument ("os.system('ls')") is
@@ -1972,7 +2092,8 @@ class PermissionAnalyzer:
                     _arg = _py_inline_call_first_arg(cmd, _m.end())
                     if _arg is not None and not _py_arg_is_resolvable(_arg):
                         return self._escalate(
-                            tool, cmd[:80],
+                            tool,
+                            cmd[:80],
                             f"Inline Python call ('{_m.group(0)}...') passes a "
                             "non-literal argument (variable/sys.argv/f-string) "
                             "whose runtime value cannot be statically checked "
@@ -1990,11 +2111,17 @@ class PermissionAnalyzer:
             # `sudo cp`, `/bin/cp`, a second line after `\n`, or `dd of=...`
             # (found by stress test, 2026-08-11 — first pass covered only the
             # bare unprefixed, single-line case).
-            if re.search(r'(?:^|[;&|\n]\s*)(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b', cmd, re.MULTILINE) or \
-               re.search(r'\bdd\s+(?:\S+\s+)*of=', cmd) or \
-               re.search(r'\bshutil\.(?:copy\w*|move)\s*\(', cmd) or \
-               re.search(r'\bos\.(?:replace|rename)\s*\(', cmd) or \
-               re.search(r'\.write_(?:text|bytes)\s*\(', cmd):
+            if (
+                re.search(
+                    r"(?:^|[;&|\n]\s*)(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b",
+                    cmd,
+                    re.MULTILINE,
+                )
+                or re.search(r"\bdd\s+(?:\S+\s+)*of=", cmd)
+                or re.search(r"\bshutil\.(?:copy\w*|move)\s*\(", cmd)
+                or re.search(r"\bos\.(?:replace|rename)\s*\(", cmd)
+                or re.search(r"\.write_(?:text|bytes)\s*\(", cmd)
+            ):
                 is_write = True
         if not is_write:
             # 2026-08-18: write primitives that reach a target path
@@ -2008,15 +2135,17 @@ class PermissionAnalyzer:
             # session against a governance path should still be escalated
             # for human visibility, matching the conservative bias already
             # used above for sqlite3 DML detection).
-            _tar_mode = re.search(r'\btar\s+(-?[a-zA-Z]{1,8})\b', cmd)
-            if re.search(r'\bpatch\b', cmd) or \
-               re.search(r'\bgit\s+apply\b', cmd) or \
-               re.search(r'\bgit\s+checkout\b[^|;&\n]*--', cmd) or \
-               (_tar_mode and "x" in _tar_mode.group(1).lower()) or \
-               _archive_dest_dirs(cmd) or \
-               re.search(r'\btar\b[^|;&\n]*--extract\b', cmd) or \
-               re.search(r'\bunzip\b', cmd) or \
-               re.search(r'(?:^|[\s;&|])ed\s+\S', cmd):
+            _tar_mode = re.search(r"\btar\s+(-?[a-zA-Z]{1,8})\b", cmd)
+            if (
+                re.search(r"\bpatch\b", cmd)
+                or re.search(r"\bgit\s+apply\b", cmd)
+                or re.search(r"\bgit\s+checkout\b[^|;&\n]*--", cmd)
+                or (_tar_mode and "x" in _tar_mode.group(1).lower())
+                or _archive_dest_dirs(cmd)
+                or re.search(r"\btar\b[^|;&\n]*--extract\b", cmd)
+                or re.search(r"\bunzip\b", cmd)
+                or re.search(r"(?:^|[\s;&|])ed\s+\S", cmd)
+            ):
                 is_write = True
         if not is_write:
             # 2026-08-18: sed --in-place, perl -i, interactive
@@ -2036,7 +2165,8 @@ class PermissionAnalyzer:
             blocked = next((h for h in (_blocked_path_hit(t) for t in _targets) if h), None)
             if blocked:
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     f"Blocked path '{blocked}' targeted by Bash write operation.",
                     "CRITICAL",
                     f"bash_write_blocked_path:{blocked}",
@@ -2047,7 +2177,8 @@ class PermissionAnalyzer:
             gov = next((h for h in (_governance_path_hit(t) for t in _targets) if h), None)
             if gov:
                 return self._escalate(
-                    tool, cmd[:80],
+                    tool,
+                    cmd[:80],
                     f"Bash write targets the DQIII8 governance corpus ('{gov}') — "
                     "human confirmation required.",
                     f"bash_write_governance_path:{gov}",
@@ -2060,15 +2191,18 @@ class PermissionAnalyzer:
                 bg_hit = _blocked_glob_hit(tok)
                 if bg_hit:
                     return self._deny(
-                        tool, cmd,
+                        tool,
+                        cmd,
                         f"Glob token in Bash write would match blocked path '{bg_hit}'.",
-                        "CRITICAL", f"bash_write_blocked_glob:{bg_hit}",
+                        "CRITICAL",
+                        f"bash_write_blocked_glob:{bg_hit}",
                         "Reference the file explicitly. Bash cannot bypass path restrictions via globbing.",
                     )
                 gg_hit = _governance_glob_hit(tok)
                 if gg_hit:
                     return self._escalate(
-                        tool, cmd[:80],
+                        tool,
+                        cmd[:80],
                         f"Glob token in Bash write would match governance path '{gg_hit}' — human confirmation required.",
                         f"bash_write_governance_glob:{gg_hit}",
                         "Confirm the governance change with the user before writing.",
@@ -2087,15 +2221,18 @@ class PermissionAnalyzer:
                 _bh = _blocked_path_hit(_norm)
                 if _bh:
                     return self._deny(
-                        tool, cmd,
+                        tool,
+                        cmd,
                         f"Blocked path '{_bh}' targeted by a DB-client SQL statement.",
-                        "CRITICAL", f"bash_sql_blocked_path:{_bh}",
+                        "CRITICAL",
+                        f"bash_sql_blocked_path:{_bh}",
                         "Do not ATTACH/VACUUM INTO a protected path from a DB client.",
                     )
                 _gh = _governance_path_hit(_norm)
                 if _gh:
                     return self._escalate(
-                        tool, cmd[:80],
+                        tool,
+                        cmd[:80],
                         f"DB-client SQL statement targets the DQIII8 governance "
                         f"corpus ('{_gh}') — human confirmation required.",
                         f"bash_sql_governance_path:{_gh}",
@@ -2110,20 +2247,24 @@ class PermissionAnalyzer:
         # shapes it exists to catch.
         if _REVERSE_SHELL_RE.search(cmd) or _interpreter_socket_shell_hit(cmd):
             return self._deny(
-                tool, cmd,
+                tool,
+                cmd,
                 "Command matches a reverse-shell shape "
                 "(mkfifo/telnet/nc backpipe, socat exec:, or an interpreter "
                 "one-liner combining a socket-open call with a shell-exec call).",
-                "CRITICAL", "bash_web_egress_reverse_shell",
+                "CRITICAL",
+                "bash_web_egress_reverse_shell",
                 "Reverse shells are never approved from an agent session.",
             )
 
         if _DNS_EXFIL_RE.search(cmd):
             return self._deny(
-                tool, cmd,
+                tool,
+                cmd,
                 "Command builds a DNS lookup (host/nslookup/dig) from a "
                 "command substitution — DNS-tunnel exfiltration shape.",
-                "CRITICAL", "bash_web_egress_dns_tunnel",
+                "CRITICAL",
+                "bash_web_egress_dns_tunnel",
                 "Never build a DNS query argument from command output.",
             )
 
@@ -2134,10 +2275,12 @@ class PermissionAnalyzer:
             # @-file attachment.
             if _UPLOAD_FORM_RE.search(cmd):
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     "Command uploads a local file via curl "
                     "(--upload-file/-T or -F/--form with an @-attachment).",
-                    "CRITICAL", "bash_web_egress_upload_form",
+                    "CRITICAL",
+                    "bash_web_egress_upload_form",
                     "Confirm the file and destination with the user before uploading.",
                 )
             # [S6] Archive/compress/encode tool piped straight into a
@@ -2150,19 +2293,23 @@ class PermissionAnalyzer:
             # pipe form is covered.
             if _ARCHIVE_PIPE_TO_NET_RE.search(cmd):
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     "Command pipes a compressed/encoded payload directly "
                     "into a network command.",
-                    "CRITICAL", "bash_web_egress_archive_pipe",
+                    "CRITICAL",
+                    "bash_web_egress_archive_pipe",
                     "Write to a file, inspect it, then send it explicitly.",
                 )
             secret = _url_secret_hit(cmd)
             if secret:
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     f"Command reaches a network tool while also carrying what looks like "
                     f"credential material ('{secret}') — that co-occurrence isn't worth the risk.",
-                    "CRITICAL", f"bash_web_egress_secret:{secret}",
+                    "CRITICAL",
+                    f"bash_web_egress_secret:{secret}",
                     "Never pass a key/token to a network command on the command line.",
                 )
             var_match = _SENSITIVE_ENV_VAR_RE.search(cmd)
@@ -2176,21 +2323,25 @@ class PermissionAnalyzer:
                 # command in the same line). The reason below states what was
                 # actually detected instead of asserting a send that wasn't verified.
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     f"Command reaches a network tool while also referencing "
                     f"what looks like a sensitive env var ('{var_match.group(0)}') "
                     "— even if unused here, that ambiguity isn't worth the risk.",
-                    "CRITICAL", "bash_web_egress_secret_envvar",
+                    "CRITICAL",
+                    "bash_web_egress_secret_envvar",
                     "Never interpolate a *_KEY/*_TOKEN/*_SECRET/*_PASSWORD env "
                     "var into a network command.",
                 )
             if _ENV_DUMP_TO_NET_RE.search(cmd):
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     "Command sends the full process environment over the "
                     "network, either piped into a network tool or "
                     "redirected straight to a socket file descriptor.",
-                    "CRITICAL", "bash_web_egress_env_dump",
+                    "CRITICAL",
+                    "bash_web_egress_env_dump",
                     "Never pipe printenv/env output to curl/wget/nc/ncat/netcat/socat, "
                     "and never redirect it (>&N) to a socket fd — send only the "
                     "specific values needed.",
@@ -2201,15 +2352,18 @@ class PermissionAnalyzer:
             # looks perfectly ordinary.
             if _PY_ENV_TO_NET_RE.search(cmd):
                 return self._deny(
-                    tool, cmd,
+                    tool,
+                    cmd,
                     "Command hands the process environment to a network call "
                     "(os.environ inside an egress call).",
-                    "CRITICAL", "bash_web_egress_env_dump",
+                    "CRITICAL",
+                    "bash_web_egress_env_dump",
                     "Send only the specific values needed, never os.environ itself.",
                 )
             if _PIPE_TO_SHELL_RE.search(cmd):
                 return self._escalate(
-                    tool, cmd[:80],
+                    tool,
+                    cmd[:80],
                     "Command downloads remote content and pipes it directly into "
                     "a shell/interpreter — human review required.",
                     "bash_web_egress_pipe_to_shell",
@@ -2217,7 +2371,8 @@ class PermissionAnalyzer:
                 )
             if _SSH_REVERSE_TUNNEL_RE.search(cmd):
                 return self._escalate(
-                    tool, cmd[:80],
+                    tool,
+                    cmd[:80],
                     "Command opens an ssh reverse tunnel (-R) — human review required.",
                     "bash_web_egress_ssh_reverse_tunnel",
                     "Confirm this reverse tunnel is intended before approving.",
@@ -2237,14 +2392,17 @@ class PermissionAnalyzer:
                     _kind, _token = _risk
                     if _kind in ("sink", "metadata"):
                         return self._deny(
-                            tool, cmd,
+                            tool,
+                            cmd,
                             f"Command sends data to '{_token}' — a known "
                             "exfiltration/metadata endpoint.",
-                            "CRITICAL", f"bash_web_egress_sink_host:{_token}",
+                            "CRITICAL",
+                            f"bash_web_egress_sink_host:{_token}",
                             "Use the documented API host instead.",
                         )
                     return self._escalate(
-                        tool, cmd[:80],
+                        tool,
+                        cmd[:80],
                         f"Command reaches private/loopback host '{_token}' — human review required.",
                         f"bash_web_egress_private_host:{_token}",
                         "Confirm this local/private-network target is intended.",
@@ -2252,7 +2410,8 @@ class PermissionAnalyzer:
                 _blob = _opaque_blob_hit(_url)
                 if _blob:
                     return self._escalate(
-                        tool, cmd[:80],
+                        tool,
+                        cmd[:80],
                         f"Command carries an opaque token ('{_blob[:32]}…') in "
                         "an outbound URL — possible encoded payload.",
                         "bash_web_egress_opaque_blob",
@@ -2266,10 +2425,12 @@ class PermissionAnalyzer:
                 _risk = _host_egress_risk(_bare)
                 if _risk and _risk[0] in ("sink", "metadata"):
                     return self._deny(
-                        tool, cmd,
+                        tool,
+                        cmd,
                         f"Command sends data to '{_risk[1]}' — a known "
                         "exfiltration/metadata endpoint.",
-                        "CRITICAL", f"bash_web_egress_sink_host:{_risk[1]}",
+                        "CRITICAL",
+                        f"bash_web_egress_sink_host:{_risk[1]}",
                         "Use the documented API host instead.",
                     )
         return None
@@ -2382,36 +2543,44 @@ class PermissionAnalyzer:
             parsed = urllib.parse.urlparse(raw)
         except Exception:
             return self._deny(
-                tool, url[:80],
+                tool,
+                url[:80],
                 f"{tool} blocked: URL could not be parsed for egress review.",
-                "HIGH", "web_egress_unparseable",
+                "HIGH",
+                "web_egress_unparseable",
                 "Supply a plain https:// URL.",
             )
 
         scheme = (parsed.scheme or "").lower()
         if scheme and scheme not in _WEB_ALLOWED_SCHEMES:
             return self._deny(
-                tool, url[:80],
+                tool,
+                url[:80],
                 f"{tool} blocked: scheme '{scheme}' is not http/https.",
-                "CRITICAL", f"web_egress_scheme:{scheme}",
+                "CRITICAL",
+                f"web_egress_scheme:{scheme}",
                 "Use Read for local files. This tool accepts http(s) URLs only.",
             )
 
         if parsed.username or parsed.password:
             return self._deny(
-                tool, url[:80],
+                tool,
+                url[:80],
                 f"{tool} blocked: URL embeds userinfo credentials (user:pass@host).",
-                "CRITICAL", "web_egress_userinfo",
+                "CRITICAL",
+                "web_egress_userinfo",
                 "Fetch the public URL. Authenticated URLs are not supported here.",
             )
 
         secret = _url_secret_hit(raw)
         if secret:
             return self._deny(
-                tool, url[:80],
+                tool,
+                url[:80],
                 f"{tool} blocked: URL carries credential material ('{secret}') — "
                 "this is exfiltration, not a lookup.",
-                "CRITICAL", f"web_egress_secret:{secret}",
+                "CRITICAL",
+                f"web_egress_secret:{secret}",
                 "Never place a key, token or private key in an outbound URL.",
             )
 
@@ -2420,22 +2589,27 @@ class PermissionAnalyzer:
             kind, token = risk
             if kind == "sink":
                 return self._deny(
-                    tool, url[:80],
+                    tool,
+                    url[:80],
                     f"{tool} blocked: '{token}' is a request-capture endpoint "
                     "whose only purpose is receiving exfiltrated data.",
-                    "CRITICAL", f"web_egress_sink_host:{token}",
+                    "CRITICAL",
+                    f"web_egress_sink_host:{token}",
                     "Fetch the real documentation or API host instead.",
                 )
             if kind == "metadata":
                 return self._deny(
-                    tool, url[:80],
+                    tool,
+                    url[:80],
                     f"{tool} blocked: '{token}' is a link-local/cloud-metadata "
                     "address (SSRF credential grab).",
-                    "CRITICAL", f"web_egress_metadata_host:{token}",
+                    "CRITICAL",
+                    f"web_egress_metadata_host:{token}",
                     "Instance metadata is never a legitimate research target.",
                 )
             return self._escalate(
-                tool, url[:80],
+                tool,
+                url[:80],
                 f"{tool} to private/loopback host '{token}' — needs human review.",
                 f"web_egress_private_host:{token}",
                 "Local services are reached with Bash curl, not a fetch tool, so "
@@ -2446,7 +2620,8 @@ class PermissionAnalyzer:
         blob = _opaque_blob_hit(raw)
         if blob:
             return self._escalate(
-                tool, url[:80],
+                tool,
+                url[:80],
                 f"{tool} carries an opaque {len(blob)}+ char token "
                 f"('{blob[:32]}…') — possible encoded payload. Human review required.",
                 "web_egress_opaque_blob",
@@ -2483,8 +2658,7 @@ class PermissionAnalyzer:
             file_path = inp.get("file_path", inp.get("path", ""))
             real_path = os.path.realpath(os.path.normpath(file_path))
             in_safe_dir = any(
-                real_path.startswith(os.path.realpath(safe))
-                for safe in SAFE_PROJECT_DIRS
+                real_path.startswith(os.path.realpath(safe)) for safe in SAFE_PROJECT_DIRS
             )
             if in_safe_dir:
                 # GOVERNANCE_PATHS excluded too: the whole governance corpus
@@ -2500,9 +2674,7 @@ class PermissionAnalyzer:
                 # maintainability only, not a security fix (no bypass here was
                 # ever open that the old and new matcher disagree on).
                 if not _blocked_path_hit(real_path) and not _governance_path_hit(real_path):
-                    return self._approve(
-                        "Safe project directory", "LOW", "safe_project_dir"
-                    )
+                    return self._approve("Safe project directory", "LOW", "safe_project_dir")
 
         # 0b block removed — learned_approvals moved after CRITICAL_PATTERNS (see 4a)
 
@@ -2524,10 +2696,12 @@ class PermissionAnalyzer:
         except Exception as _cpe:
             log.warning("permission_analyzer: _candidate_paths failed: %s", _cpe)
             return self._deny(
-                tool, str(detail)[:80],
+                tool,
+                str(detail)[:80],
                 f"Internal analyzer error ({type(_cpe).__name__}) during path "
                 "extraction — denying as precaution.",
-                "HIGH", "analyzer_internal_error",
+                "HIGH",
+                "analyzer_internal_error",
                 "Retry, or ask the user to perform this write manually.",
             )
         for path in _candidates:
@@ -2585,10 +2759,12 @@ class PermissionAnalyzer:
                 # stress test, 2026-08-11).
                 log.warning("permission_analyzer: _bash_touches_blocked failed: %s", _bte)
                 return self._deny(
-                    tool, str(cmd)[:80],
+                    tool,
+                    str(cmd)[:80],
                     f"Internal analyzer error ({type(_bte).__name__}) during "
                     "blocked-path check — denying as precaution.",
-                    "HIGH", "analyzer_internal_error",
+                    "HIGH",
+                    "analyzer_internal_error",
                     "Retry, or ask the user to run this command manually.",
                 )
 
@@ -2603,10 +2779,12 @@ class PermissionAnalyzer:
             except Exception as _rte:
                 log.warning("permission_analyzer: _read_family_credential_block failed: %s", _rte)
                 return self._deny(
-                    tool, str(inp.get("file_path", inp.get("path", "")))[:80],
+                    tool,
+                    str(inp.get("file_path", inp.get("path", "")))[:80],
                     f"Internal analyzer error ({type(_rte).__name__}) during "
                     "credential check — denying as precaution.",
-                    "HIGH", "analyzer_internal_error",
+                    "HIGH",
+                    "analyzer_internal_error",
                     "Retry, or ask the user to check this file manually.",
                 )
 
@@ -2624,10 +2802,12 @@ class PermissionAnalyzer:
             except Exception as _mce:
                 log.warning("permission_analyzer: MCP credential check failed: %s", _mce)
                 return self._deny(
-                    tool, str(detail)[:80],
+                    tool,
+                    str(detail)[:80],
                     f"Internal analyzer error ({type(_mce).__name__}) during "
                     "MCP credential check — denying as precaution.",
-                    "HIGH", "analyzer_internal_error",
+                    "HIGH",
+                    "analyzer_internal_error",
                     "Retry, or ask the user to perform this call manually.",
                 )
 
@@ -2670,10 +2850,12 @@ class PermissionAnalyzer:
             except Exception as _wee:
                 log.warning("permission_analyzer: _web_egress_block failed: %s", _wee)
                 return self._deny(
-                    tool, str(inp.get("url", ""))[:80],
+                    tool,
+                    str(inp.get("url", ""))[:80],
                     f"Internal analyzer error ({type(_wee).__name__}) during "
                     "web egress check — denying as precaution.",
-                    "HIGH", "analyzer_internal_error",
+                    "HIGH",
+                    "analyzer_internal_error",
                     "Retry, or ask the user to fetch this URL manually.",
                 )
 
@@ -2690,9 +2872,11 @@ class PermissionAnalyzer:
             _secret = _url_secret_hit(_payload_text)
             if _secret:
                 return self._deny(
-                    tool, _payload_text[:80],
+                    tool,
+                    _payload_text[:80],
                     f"MCP call carries credential material ('{_secret}') in its arguments.",
-                    "CRITICAL", f"mcp_payload_secret:{_secret}",
+                    "CRITICAL",
+                    f"mcp_payload_secret:{_secret}",
                     "Never pass a key/token as an MCP tool argument — read it via "
                     "os.environ.get() only where the code that needs it runs.",
                 )
@@ -2742,23 +2926,27 @@ class PermissionAnalyzer:
                 for _pattern in CRITICAL_PATTERNS:
                     if re.search(_pattern, _ansi_c_decoded, re.IGNORECASE):
                         _ansi_hit = _pattern
-                        _ansi_label = _CRITICAL_PATTERN_LABELS.get(_pattern, "unlabeled catastrophic pattern")
+                        _ansi_label = _CRITICAL_PATTERN_LABELS.get(
+                            _pattern, "unlabeled catastrophic pattern"
+                        )
                         break
                 if not _ansi_hit:
                     for _pattern, _rule in HIGH_RISK_PATTERNS:
                         if re.search(_pattern, _ansi_c_decoded, re.IGNORECASE):
                             _ansi_hit = _rule
-                            _ansi_label = _HIGH_RISK_PATTERN_LABELS.get(_rule, "unlabeled high-risk pattern")
+                            _ansi_label = _HIGH_RISK_PATTERN_LABELS.get(
+                                _rule, "unlabeled high-risk pattern"
+                            )
                             break
             if _ansi_hit:
                 return self._escalate(
-                    tool, _bash_cmd[:80],
+                    tool,
+                    _bash_cmd[:80],
                     f"Command contains an ANSI-C quoted ($'...') span that "
                     f"decodes to a high-risk pattern ('{_ansi_label}') — human "
                     "review required.",
                     f"bash_ansi_c_obfuscated:{_ansi_hit}",
-                    "Confirm the decoded command's intent with the user "
-                    "before approving.",
+                    "Confirm the decoded command's intent with the user " "before approving.",
                 )
 
         # [S5] Decoded-payload-piped-to-shell — base64/openssl/xxd/uudecode
@@ -2772,7 +2960,8 @@ class PermissionAnalyzer:
         # reach; only the direct pipe form is covered.
         if tool == "Bash" and _bash_cmd and _OBFUSCATED_DECODE_PIPE_RE.search(_bash_cmd):
             return self._escalate(
-                tool, _bash_cmd[:80],
+                tool,
+                _bash_cmd[:80],
                 "Command decodes a base64/openssl/xxd/uudecode payload "
                 "directly into a shell/interpreter — human review required.",
                 "bash_obfuscated_decode_pipe_to_shell",
@@ -2788,30 +2977,38 @@ class PermissionAnalyzer:
                 for _tgt in _rm_destructive_targets(cmd):
                     if _tgt == "/":
                         return self._deny(
-                            tool, cmd,
+                            tool,
+                            cmd,
                             f"Catastrophic command blocked: recursive-force rm "
                             f"targeting root filesystem: '{cmd[:80]}'",
-                            "CRITICAL", "critical_pattern:rm_rf_root",
+                            "CRITICAL",
+                            "critical_pattern:rm_rf_root",
                             "This command is irreversible and catastrophic.",
                         )
                 for pattern in CRITICAL_PATTERNS:
                     if re.search(pattern, cmd, re.IGNORECASE) or (
                         _sql_decommented and re.search(pattern, _sql_decommented, re.IGNORECASE)
                     ):
-                        _label = _CRITICAL_PATTERN_LABELS.get(pattern, "unlabeled catastrophic pattern")
+                        _label = _CRITICAL_PATTERN_LABELS.get(
+                            pattern, "unlabeled catastrophic pattern"
+                        )
                         return self._deny(
-                            tool, cmd,
+                            tool,
+                            cmd,
                             f"Catastrophic command blocked ({_label}): '{cmd[:80]}'",
-                            "CRITICAL", f"critical_pattern:{pattern}",
+                            "CRITICAL",
+                            f"critical_pattern:{pattern}",
                             "This command is irreversible and catastrophic.",
                         )
             except Exception as _ce:
                 log.warning("permission_analyzer: CRITICAL pattern check failed: %s", _ce)
                 return self._deny(
-                    tool, str(inp.get("command", ""))[:80],
+                    tool,
+                    str(inp.get("command", ""))[:80],
                     f"Internal analyzer error ({type(_ce).__name__}) during "
                     "critical check — denying as precaution.",
-                    "HIGH", "analyzer_internal_error",
+                    "HIGH",
+                    "analyzer_internal_error",
                     "Retry with a valid command string.",
                 )
 
@@ -2826,18 +3023,22 @@ class PermissionAnalyzer:
                 if _rm_hits and not self._rm_target_is_allowed(cmd):
                     if DQIII8_MODE == "autonomous":
                         return self._deny(
-                            tool, cmd,
+                            tool,
+                            cmd,
                             f"High-risk command in autonomous mode (recursive-force rm "
                             f"outside ALLOWED_DELETIONS): {cmd[:80]}",
-                            "HIGH", "high_risk_pattern:rm_rf",
+                            "HIGH",
+                            "high_risk_pattern:rm_rf",
                             "Use ALLOWED_DELETIONS or run in supervised mode.",
                         )
                     else:
                         return self._deny(
-                            tool, cmd,
+                            tool,
+                            cmd,
                             f"Blocked command (recursive-force rm outside "
                             f"ALLOWED_DELETIONS): '{cmd[:80]}'",
-                            "CRITICAL", "high_risk_pattern:rm_rf",
+                            "CRITICAL",
+                            "high_risk_pattern:rm_rf",
                             "This command is destructive and irreversible.",
                         )
                 # [S4] git push --delete / :<ref> targeting a protected
@@ -2848,9 +3049,11 @@ class PermissionAnalyzer:
                     _del_ref = _git_push_deleted_ref(cmd)
                     if _del_ref and _is_protected_branch(_del_ref):
                         return self._deny(
-                            tool, cmd,
+                            tool,
+                            cmd,
                             f"git push deletes protected branch '{_del_ref}': '{cmd[:80]}'",
-                            "CRITICAL", "high_risk_pattern:git_push_delete_protected_branch",
+                            "CRITICAL",
+                            "high_risk_pattern:git_push_delete_protected_branch",
                             "Protected branches (main/master/production/release/"
                             "develop/trunk/staging/prod/premium-main/premium-full, "
                             "release/*, hotfix/*) cannot be deleted from a session.",
@@ -2865,7 +3068,8 @@ class PermissionAnalyzer:
                 for _vac_sql in (cmd, _sql_decommented):
                     if _vac_sql and _SQL_VACUUM_INTO_RE.search(_vac_sql):
                         return self._escalate(
-                            tool, cmd[:80],
+                            tool,
+                            cmd[:80],
                             "VACUUM INTO copies the entire database to an "
                             "arbitrary destination — human confirmation required.",
                             "sql_vacuum_into_arbitrary_copy",
@@ -2880,10 +3084,12 @@ class PermissionAnalyzer:
                 )
                 if _lit:
                     return self._deny(
-                        tool, cmd,
+                        tool,
+                        cmd,
                         f"Unbounded DELETE on an audit table: predicate "
                         f"'{_lit}' is always true — '{cmd[:80]}'",
-                        "CRITICAL", "high_risk_pattern:sql_literal_tautology",
+                        "CRITICAL",
+                        "high_risk_pattern:sql_literal_tautology",
                         "Bound the DELETE with a real predicate, or use "
                         "bin/core/action_log.py for legitimate writes.",
                     )
@@ -2894,25 +3100,31 @@ class PermissionAnalyzer:
                         _label = _HIGH_RISK_PATTERN_LABELS.get(_rule, "unlabeled high-risk pattern")
                         if DQIII8_MODE == "autonomous":
                             return self._deny(
-                                tool, cmd,
+                                tool,
+                                cmd,
                                 f"High-risk command in autonomous mode ({_label}): {cmd[:80]}",
-                                "HIGH", f"high_risk_pattern:{_rule}",
+                                "HIGH",
+                                f"high_risk_pattern:{_rule}",
                                 "Use ALLOWED_DELETIONS or run in supervised mode.",
                             )
                         else:
                             return self._deny(
-                                tool, cmd,
+                                tool,
+                                cmd,
                                 f"Blocked command ({_label}): '{cmd[:80]}'",
-                                "CRITICAL", f"high_risk_pattern:{_rule}",
+                                "CRITICAL",
+                                f"high_risk_pattern:{_rule}",
                                 "This command is destructive and irreversible.",
                             )
             except Exception as _he:
                 log.warning("permission_analyzer: HIGH_RISK pattern check failed: %s", _he)
                 return self._deny(
-                    tool, str(inp.get("command", ""))[:80],
+                    tool,
+                    str(inp.get("command", ""))[:80],
                     f"Internal analyzer error ({type(_he).__name__}) during "
                     "high-risk check — denying as precaution.",
-                    "HIGH", "analyzer_internal_error",
+                    "HIGH",
+                    "analyzer_internal_error",
                     "Retry with a valid command string.",
                 )
 
@@ -2920,9 +3132,7 @@ class PermissionAnalyzer:
         # checks. A historically-safe pattern can never override
         # any of those denies, even latently.
         if self._is_learned_safe(tool, detail):
-            return self._approve(
-                "Pattern approved by history", "LOW", "learned_approval"
-            )
+            return self._approve("Pattern approved by history", "LOW", "learned_approval")
 
         # 5. Autonomous mode — auto-approve standard tools (after checks)
         if DQIII8_MODE == "autonomous" and tool in AUTO_APPROVE_TOOLS:
@@ -3046,7 +3256,8 @@ class PermissionAnalyzer:
         except Exception as e:
             log.warning(
                 "permission_analyzer: _check_repeat_rejections query failed "
-                "— using in-process counter: %s", e
+                "— using in-process counter: %s",
+                e,
             )
             _key = f"{tool}|{detail[:50]}"
             with _proc_rejection_lock:
@@ -3088,7 +3299,6 @@ class PermissionAnalyzer:
         except Exception:
             return False
 
-
     def _check_budget(self, session_id: str) -> dict | None:
         """Blocks if estimated session cost exceeds MAX_SESSION_COST_USD."""
         try:
@@ -3105,8 +3315,7 @@ class PermissionAnalyzer:
                 return self._deny(
                     "budget",
                     f"${estimated_cost:.2f}",
-                    f"Session budget exceeded: "
-                    f"${estimated_cost:.2f} > ${MAX_SESSION_COST_USD}",
+                    f"Session budget exceeded: " f"${estimated_cost:.2f} > ${MAX_SESSION_COST_USD}",
                     "HIGH",
                     "budget_exceeded",
                     "Split the objective into smaller subtasks. "
@@ -3119,10 +3328,12 @@ class PermissionAnalyzer:
             # corrupt, which is not a theoretical state under a concurrent writer.
             log.warning("permission_analyzer: _check_budget query failed: %s", e, exc_info=True)
             return self._deny(
-                "budget", session_id,
+                "budget",
+                session_id,
                 f"Internal analyzer error ({type(e).__name__}) during "
                 "budget check — denying as precaution.",
-                "HIGH", "analyzer_internal_error",
+                "HIGH",
+                "analyzer_internal_error",
                 "Retry once the permissions DB is reachable.",
             )
         return None
@@ -3153,7 +3364,9 @@ def _notify_telegram_activation(tool_name: str, pattern: str) -> None:
             timeout=5,
         )
     except Exception as e:
-        log.warning("permission_analyzer: _notify_telegram_activation send failed: %s", e, exc_info=True)  # never block the pipeline
+        log.warning(
+            "permission_analyzer: _notify_telegram_activation send failed: %s", e, exc_info=True
+        )  # never block the pipeline
 
 
 def _notify_telegram_escalation(entry: dict) -> None:
@@ -3187,7 +3400,9 @@ def _notify_telegram_escalation(entry: dict) -> None:
             timeout=5,
         )
     except Exception as e:
-        log.warning("permission_analyzer: _notify_telegram_escalation send failed: %s", e, exc_info=True)  # never block the pipeline
+        log.warning(
+            "permission_analyzer: _notify_telegram_escalation send failed: %s", e, exc_info=True
+        )  # never block the pipeline
 
 
 def record_decision(tool: str, inp: dict, result: dict) -> None:
@@ -3217,10 +3432,7 @@ def record_decision(tool: str, inp: dict, result: dict) -> None:
             ),
         )
         # Auto-learning for low-risk patterns
-        if (
-            result.get("risk_level") == "LOW"
-            and result.get("reason") != "learned_approval"
-        ):
+        if result.get("risk_level") == "LOW" and result.get("reason") != "learned_approval":
             pattern = action_detail[:50].strip()
             if pattern:
                 conn.execute(
@@ -3324,7 +3536,9 @@ def record_rejection(tool: str, inp: dict, result: dict, session_id: str | None 
         conn.commit()
         conn.close()
     except Exception as e:
-        log.warning("permission_analyzer: record_rejection DB channel write failed: %s", e, exc_info=True)
+        log.warning(
+            "permission_analyzer: record_rejection DB channel write failed: %s", e, exc_info=True
+        )
 
     # Channel 2: JSON mailbox (append to array)
     try:
@@ -3343,7 +3557,9 @@ def record_rejection(tool: str, inp: dict, result: dict, session_id: str | None 
             encoding="utf-8",
         )
     except Exception as e:
-        log.warning("permission_analyzer: record_rejection JSON mailbox write failed: %s", e, exc_info=True)
+        log.warning(
+            "permission_analyzer: record_rejection JSON mailbox write failed: %s", e, exc_info=True
+        )
 
     # Channel 3: Telegram (ESCALATE only — DENY is final, needs no operator action)
     if entry["decision"] == "ESCALATE":
