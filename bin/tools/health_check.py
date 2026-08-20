@@ -41,8 +41,13 @@ OUT.mkdir(parents=True, exist_ok=True)
 # within a single day, regardless of any real incident (Opus red-team review,
 # 2026-08-13, round 4 consequence of round 3 P1-2's correlation tightening).
 _TRIAGE_WHITELIST_TYPES = (
-    "openrouter_wrapperError", "ESCALATION", "nimError", "openrouterError",
-    "githubError", "groqError", "pollinationsError",
+    "openrouter_wrapperError",
+    "ESCALATION",
+    "nimError",
+    "openrouterError",
+    "githubError",
+    "groqError",
+    "pollinationsError",
 )
 _TRIAGE_MESSAGE_PATTERNS = ("%failed — no response or HTTP error%", "%Escalated from%")
 

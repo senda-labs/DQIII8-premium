@@ -28,7 +28,9 @@ if not log.handlers:
         _fh = logging.handlers.RotatingFileHandler(
             str(_log_dir / "hooks.log"), maxBytes=2_000_000, backupCount=3
         )
-        _fh.setFormatter(logging.Formatter("%(asctime)s [subagent_start] %(levelname)s %(message)s"))
+        _fh.setFormatter(
+            logging.Formatter("%(asctime)s [subagent_start] %(levelname)s %(message)s")
+        )
         log.addHandler(_fh)
     else:
         log.addHandler(logging.NullHandler())
@@ -47,7 +49,9 @@ session_id = data.get("session_id", "unknown")
 # worktree block and the lookup-file write are already gated on `agent_id`).
 _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 if agent_id and not _AGENT_ID_RE.match(agent_id):
-    log.warning("subagent_start: agent_id failed format validation, treating as absent: %r", agent_id[:80])
+    log.warning(
+        "subagent_start: agent_id failed format validation, treating as absent: %r", agent_id[:80]
+    )
     agent_id = ""
 timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
 
@@ -94,7 +98,9 @@ if agent_id:
                 result.stderr.decode("utf-8", errors="replace")[:500],
             )  # worktree failure must never block agent execution
     except Exception as e:
-        log.warning("subagent_start: git worktree creation failed: %s", e, exc_info=True)  # worktree failure must never block agent execution
+        log.warning(
+            "subagent_start: git worktree creation failed: %s", e, exc_info=True
+        )  # worktree failure must never block agent execution
 
 # ── Step 1: Write lookup file (secure, no /tmp race condition) ───────────────
 if agent_id:
@@ -137,7 +143,9 @@ try:
         conn.commit()
         conn.close()
 except Exception as e:
-    log.warning("subagent_start: agent_registry INSERT failed: %s", e, exc_info=True)  # logging never blocks execution
+    log.warning(
+        "subagent_start: agent_registry INSERT failed: %s", e, exc_info=True
+    )  # logging never blocks execution
 
 # ── Step 3: Inject additionalContext ────────────────────────────────────────
 ctx = (
@@ -150,7 +158,13 @@ if worktree_path:
         f" Your isolated working directory is {worktree_path}. "
         f"When done, clean up with: git worktree remove --force {worktree_path}"
     )
-log.info("injected agent_id=%s type=%s worktree=%s chars=%d", agent_id, resolved_name, bool(worktree_path), len(ctx))
+log.info(
+    "injected agent_id=%s type=%s worktree=%s chars=%d",
+    agent_id,
+    resolved_name,
+    bool(worktree_path),
+    len(ctx),
+)
 print(json.dumps({"additionalContext": ctx}))
 
 sys.exit(0)

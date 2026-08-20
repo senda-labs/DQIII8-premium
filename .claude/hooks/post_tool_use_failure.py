@@ -35,7 +35,9 @@ if not log.handlers:
         _fh = logging.handlers.RotatingFileHandler(
             str(_log_dir / "hooks.log"), maxBytes=2_000_000, backupCount=3
         )
-        _fh.setFormatter(logging.Formatter("%(asctime)s [post_tool_use_failure] %(levelname)s %(message)s"))
+        _fh.setFormatter(
+            logging.Formatter("%(asctime)s [post_tool_use_failure] %(levelname)s %(message)s")
+        )
         log.addHandler(_fh)
     else:
         log.addHandler(logging.NullHandler())
@@ -214,7 +216,9 @@ def main() -> None:
         conn.commit()
         conn.close()
     except Exception as e:
-        log.warning("post_tool_use_failure: error_log INSERT failed: %s", e, exc_info=True)  # never block on logging failure
+        log.warning(
+            "post_tool_use_failure: error_log INSERT failed: %s", e, exc_info=True
+        )  # never block on logging failure
 
     try:
         conn2 = sqlite3.connect(DB, timeout=10)
@@ -241,7 +245,9 @@ def main() -> None:
         # logged distinctly so the race's real frequency stays observable.
         log.info("post_tool_use_failure: agent_actions already closed (double-close race): %s", e)
     except Exception as e:
-        log.warning("post_tool_use_failure: agent_actions UPDATE failed: %s", e, exc_info=True)  # never block on logging failure
+        log.warning(
+            "post_tool_use_failure: agent_actions UPDATE failed: %s", e, exc_info=True
+        )  # never block on logging failure
 
     sys.exit(0)
 

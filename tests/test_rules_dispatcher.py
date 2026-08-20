@@ -45,9 +45,7 @@ def declarative_aliases() -> set[str]:
 
 
 def inline_aliases() -> set[str]:
-    return intro.inline_aliases(
-        DISPATCHER_SRC.read_text(encoding="utf-8"), rd._REGISTRY
-    )
+    return intro.inline_aliases(DISPATCHER_SRC.read_text(encoding="utf-8"), rd._REGISTRY)
 
 
 def reachable_aliases() -> set[str]:
@@ -104,9 +102,9 @@ def test_bash_agent_pattern_matches_real_entry_points_not_bare_agent():
     matched any incidental mention of the English word "agent")."""
     for cmd in ("ls bin/agents/", "python3 bin/core/dispatch.py --help"):
         injected = rd.get_rules("Bash", {"command": cmd})
-        assert "Escalation to Opus" in injected or "Plan Gate" in injected, (
-            f"expected plan-gate rules injected for {cmd!r}"
-        )
+        assert (
+            "Escalation to Opus" in injected or "Plan Gate" in injected
+        ), f"expected plan-gate rules injected for {cmd!r}"
     # The bare word alone must NOT trigger — it's not a real code path.
     injected = rd.get_rules("Bash", {"command": "list every agent in the roster"})
     assert "Escalation to Opus" not in injected and "Plan Gate" not in injected
@@ -130,9 +128,9 @@ def test_governance_and_agent_aliases_all_resolve():
 # source (bin/tools/validate_rules_registry.py's _canonical_range(), the same
 # function the pre-commit gate uses), so this file cannot go stale on its own.
 _CANON = vrr._canonical_range(DISPATCHER_SRC.read_text(encoding="utf-8"))
-assert _CANON is not None, (
-    f"{DISPATCHER_SRC}: docstring missing the canonical 'suelo N'/'techo N' markers"
-)
+assert (
+    _CANON is not None
+), f"{DISPATCHER_SRC}: docstring missing the canonical 'suelo N'/'techo N' markers"
 MEASURED_FLOOR, MEASURED_CEILING = _CANON
 
 # RC-2026-08-18: there used to be a TOLERANCE = 0.05 band here (±340 tokens at
@@ -184,10 +182,7 @@ BUDGET_MATRIX = [
     # the budget gate green (context-economy audit N3, 2026-08-18).
     (
         "Edit",
-        {
-            "file_path": "/root/dqiii8/database/.claude/hooks/"
-            "openrouter_wrapper_domain_agent.py"
-        },
+        {"file_path": "/root/dqiii8/database/.claude/hooks/" "openrouter_wrapper_domain_agent.py"},
         "edit-hooks-tiering-db-py",
     ),
 ]

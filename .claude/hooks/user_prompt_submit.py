@@ -31,7 +31,9 @@ if not log.handlers:
         _fh = logging.handlers.RotatingFileHandler(
             str(_log_dir / "hooks.log"), maxBytes=2_000_000, backupCount=3
         )
-        _fh.setFormatter(logging.Formatter("%(asctime)s [user_prompt_submit] %(levelname)s %(message)s"))
+        _fh.setFormatter(
+            logging.Formatter("%(asctime)s [user_prompt_submit] %(levelname)s %(message)s")
+        )
         log.addHandler(_fh)
     else:
         log.addHandler(logging.NullHandler())
@@ -78,7 +80,9 @@ def _parse_project_file(md_path) -> dict | None:
         text = md_path.read_text(encoding="utf-8")
     except Exception:
         return None
-    m_next = re.search(r"##\s*(?:[Nn]ext step|[Pp]r[oó]ximo paso)[^\n]*\n\s*\n*\**(.+)", text, re.IGNORECASE)
+    m_next = re.search(
+        r"##\s*(?:[Nn]ext step|[Pp]r[oó]ximo paso)[^\n]*\n\s*\n*\**(.+)", text, re.IGNORECASE
+    )
     next_step = m_next.group(1).strip().strip("*").strip("|").strip() if m_next else ""
     if len(next_step) > 120:
         next_step = next_step[:117] + "..."
@@ -122,7 +126,9 @@ def _known_project_names() -> set[str]:
     return {p.name for p in PROJECTS_DIR.iterdir() if p.is_dir()} | {"dqiii8-core"}
 
 
-def _log_nl_shadow_candidate(prompt: str, matched_project: str, confidence: float, agreed: bool) -> None:
+def _log_nl_shadow_candidate(
+    prompt: str, matched_project: str, confidence: float, agreed: bool
+) -> None:
     """Shadow layer: log fuzzy-match candidates for recall measurement, never used for attribution."""
     if not DB.exists():
         return
@@ -252,7 +258,11 @@ def _log_skill_invocation(skill_name: str) -> None:
         conn.commit()
         conn.close()
     except Exception as e:
-        log.warning("user_prompt_submit: _log_skill_invocation skill_metrics write failed: %s", e, exc_info=True)
+        log.warning(
+            "user_prompt_submit: _log_skill_invocation skill_metrics write failed: %s",
+            e,
+            exc_info=True,
+        )
 
 
 def _spc_alert() -> str:
@@ -308,7 +318,9 @@ def main() -> None:
         shadow_match = _detect_project_from_prompt(prompt, _projects_for_shadow)
         if shadow_match:
             _log_nl_shadow_candidate(
-                prompt, shadow_match["name"], confidence=0.5,
+                prompt,
+                shadow_match["name"],
+                confidence=0.5,
                 agreed=(nl_match == shadow_match["name"]),
             )
     except Exception as e:

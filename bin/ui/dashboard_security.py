@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Security middleware for DQ Dashboard."""
+
 import os
 import secrets
 from pathlib import Path

@@ -2,6 +2,7 @@
 Central path constants for DQIII8.
 All code must import from here — never hardcode /root/dqiii8 directly.
 """
+
 import os
 from pathlib import Path
 

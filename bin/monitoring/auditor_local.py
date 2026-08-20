@@ -31,11 +31,13 @@ REPORTS_DIR = DQIII8_ROOT / "database" / "audit_reports"
 
 # ── DB connection ─────────────────────────────────────────────────────────────
 
+
 def _conn() -> sqlite3.Connection:
     return sqlite3.connect(str(DB), timeout=5)
 
 
 # ── Component 1: Action Success Rate (30%) ───────────────────────────────────
+
 
 def check_action_success(conn: sqlite3.Connection, period_days: int) -> tuple[float, dict]:
     row = conn.execute(
@@ -49,6 +51,7 @@ def check_action_success(conn: sqlite3.Connection, period_days: int) -> tuple[fl
 
 
 # ── Component 2: Error Resolution Rate (30%) ─────────────────────────────────
+
 
 def check_error_resolution(conn: sqlite3.Connection, period_days: int) -> tuple[float, dict]:
     row = conn.execute(
@@ -77,6 +80,7 @@ def get_unresolved_errors(conn: sqlite3.Connection) -> list[dict]:
 
 # ── Component 3: Hook Integrity (20%) ────────────────────────────────────────
 
+
 def check_hook_integrity() -> tuple[float, dict]:
     if not HOOKS_DIR.exists():
         return 100.0, {"total": 0, "valid": 0, "note": "hooks dir absent"}
@@ -100,12 +104,12 @@ def check_hook_integrity() -> tuple[float, dict]:
 
 # ── Component 4: Learning Rate (10%) ─────────────────────────────────────────
 
+
 def check_learning_rate(conn: sqlite3.Connection, period_days: int) -> tuple[float, dict]:
     target = 5  # lessons / week
     try:
         row = conn.execute(
-            "SELECT COUNT(*) FROM learning_metrics "
-            "WHERE timestamp > datetime('now', ?)",
+            "SELECT COUNT(*) FROM learning_metrics " "WHERE timestamp > datetime('now', ?)",
             (f"-{period_days} days",),
         ).fetchone()
         count = row[0] or 0
@@ -120,6 +124,7 @@ def check_learning_rate(conn: sqlite3.Connection, period_days: int) -> tuple[flo
 
 
 # ── Component 5: System Health (10%) ─────────────────────────────────────────
+
 
 def check_system_health() -> tuple[float, dict]:
     checks: dict = {}
@@ -172,6 +177,7 @@ def check_system_health() -> tuple[float, dict]:
 
 # ── Score and labels ──────────────────────────────────────────────────────────
 
+
 def compute_score(c1: float, c2: float, c3: float, c4: float, c5: float) -> float:
     return round(c1 * 0.30 + c2 * 0.30 + c3 * 0.20 + c4 * 0.10 + c5 * 0.10, 1)
 
@@ -185,6 +191,7 @@ def status_label(score: float) -> str:
 
 
 # ── Output formatting ─────────────────────────────────────────────────────────
+
 
 def format_terminal(components: dict, score: float, unresolved: list[dict]) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -221,6 +228,7 @@ def format_terminal(components: dict, score: float, unresolved: list[dict]) -> s
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
+
 def _write_report_file(report_text: str) -> Path:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
@@ -255,6 +263,7 @@ def _register_in_db(
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+
 def run(period_days: int = 7, as_json: bool = False) -> int:
     if not DB.exists():
         print(f"[auditor_local] ERROR: DB not found at {DB}", file=sys.stderr)
@@ -272,22 +281,27 @@ def run(period_days: int = 7, as_json: bool = False) -> int:
         conn.close()
 
     components = {
-        "action_success":   {"rate": s1, "meta": s1_meta},
+        "action_success": {"rate": s1, "meta": s1_meta},
         "error_resolution": {"rate": s2, "meta": s2_meta},
-        "hook_integrity":   {"score": s3, "meta": s3_meta},
-        "learning_rate":    {"score": s4, "meta": s4_meta},
-        "system_health":    {"score": s5, "meta": s5_meta},
+        "hook_integrity": {"score": s3, "meta": s3_meta},
+        "learning_rate": {"score": s4, "meta": s4_meta},
+        "system_health": {"score": s5, "meta": s5_meta},
     }
 
     score = compute_score(s1, s2, s3, s4, s5)
 
     if as_json:
-        print(json.dumps({
-            "score": score,
-            "status": status_label(score),
-            "components": components,
-            "unresolved_errors": unresolved,
-        }, indent=2))
+        print(
+            json.dumps(
+                {
+                    "score": score,
+                    "status": status_label(score),
+                    "components": components,
+                    "unresolved_errors": unresolved,
+                },
+                indent=2,
+            )
+        )
         return 0 if score >= 85 else (1 if score >= 70 else 2)
 
     report_text = format_terminal(components, score, unresolved)
@@ -312,8 +326,9 @@ def main() -> None:
         epilog="Exit codes: 0=HEALTHY  1=WARNING  2=CRITICAL",
     )
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    parser.add_argument("--period", type=int, default=7, metavar="DAYS",
-                        help="Analysis window in days (default: 7)")
+    parser.add_argument(
+        "--period", type=int, default=7, metavar="DAYS", help="Analysis window in days (default: 7)"
+    )
     args = parser.parse_args()
     sys.exit(run(period_days=args.period, as_json=args.json))
 

@@ -482,22 +482,31 @@ def check_triage_ran() -> None:
             first_commit_ts = int(
                 subprocess.run(
                     ["git", "log", "--reverse", "--format=%at"],
-                    cwd=DQIII8_ROOT, capture_output=True, text=True, timeout=10,
+                    cwd=DQIII8_ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
                 ).stdout.splitlines()[0]
             )
-            install_age_h = (NOW - datetime.fromtimestamp(first_commit_ts, tz=timezone.utc)).total_seconds() / 3600
+            install_age_h = (
+                NOW - datetime.fromtimestamp(first_commit_ts, tz=timezone.utc)
+            ).total_seconds() / 3600
         except (IndexError, ValueError, subprocess.SubprocessError):
             install_age_h = 0  # can't determine — don't false-alarm on a fresh/odd checkout
         check(
             "triage_ran",
             install_age_h <= 48,
-            "history file absent" + (
-                " (fresh install, no run yet)" if install_age_h <= 48
+            "history file absent"
+            + (
+                " (fresh install, no run yet)"
+                if install_age_h <= 48
                 else f" and install is {install_age_h:.0f}h old — triage cron may never have run"
             ),
         )
         return
-    age_h = (NOW - datetime.fromtimestamp(marker.stat().st_mtime, tz=timezone.utc)).total_seconds() / 3600
+    age_h = (
+        NOW - datetime.fromtimestamp(marker.stat().st_mtime, tz=timezone.utc)
+    ).total_seconds() / 3600
     check("triage_ran", age_h <= 48, f"last successful run {age_h:.0f}h ago (limit 48h)")
 
 

@@ -29,13 +29,18 @@ def main() -> int:
     log_opts = sys.argv[1]
     result = subprocess.run(
         ["git", "log", log_opts, "--name-only", "--pretty=format:"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     paths = {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
     hits = [(p, blocked) for p in paths if (blocked := _blocked_path_hit(p))]
     if hits:
-        print("[check-blocked-paths] BLOCKED_PATHS matched in the commits about to be pushed:", file=sys.stderr)
+        print(
+            "[check-blocked-paths] BLOCKED_PATHS matched in the commits about to be pushed:",
+            file=sys.stderr,
+        )
         for path, blocked in hits:
             print(f"  {path}  (matches '{blocked}')", file=sys.stderr)
         return 1

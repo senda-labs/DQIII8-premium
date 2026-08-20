@@ -2,6 +2,7 @@
 installer's heredoc must stay in sync with the live .git/hooks/pre-push —
 mirrors tests/test_setup_gitleaks_hook.py's guard against the same drift
 that already bit the pre-commit hook once (2026-08-18, rules-registry gate)."""
+
 import re
 from pathlib import Path
 
@@ -9,7 +10,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = REPO_ROOT / "bin" / "tools" / "setup_prepush_hook.sh"
 
 EXPECTED_GATE = (
-    "gitleaks detect --source . --log-opts=\"${log_opts}\" --redact "
+    'gitleaks detect --source . --log-opts="${log_opts}" --redact '
     "--exit-code 1 --config .gitleaks.toml"
 )
 

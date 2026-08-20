@@ -15,6 +15,7 @@ from datetime import datetime
 import httpx
 
 import logging
+
 log = logging.getLogger(__name__)
 CONTENT_ROOT = os.environ.get("CONTENT_PROJECT_ROOT", "")
 if CONTENT_ROOT:
@@ -169,7 +170,7 @@ class GitHubClient:
                     text = re.sub(r"#{1,6}\s", "", text)
                     return text.strip()[:1500]
         except Exception as _exc:
-            log.warning('%s: %s', __name__, _exc)
+            log.warning("%s: %s", __name__, _exc)
         return ""
 
     def get_topics(self, full_name: str) -> list:
@@ -183,7 +184,7 @@ class GitHubClient:
                 if resp.status_code == 200:
                     return resp.json().get("names", [])
         except Exception as _exc:
-            log.warning('%s: %s', __name__, _exc)
+            log.warning("%s: %s", __name__, _exc)
         return []
 
     def scrape_page_markdown(self, url: str) -> str:
@@ -240,7 +241,7 @@ class GitHubClient:
                         "py_files_sample": py_files[:10],
                     }
         except Exception as _exc:
-            log.warning('%s: %s', __name__, _exc)
+            log.warning("%s: %s", __name__, _exc)
         return {}
 
     def get_repo_issues_summary(self, full_name: str) -> dict:
@@ -259,7 +260,7 @@ class GitHubClient:
                         "latest_issue_title": (issues[0]["title"][:80] if issues else "none"),
                     }
         except Exception as _exc:
-            log.warning('%s: %s', __name__, _exc)
+            log.warning("%s: %s", __name__, _exc)
         return {}
 
 
@@ -338,7 +339,7 @@ class ApplicabilityEvaluator:
                 else:
                     reasons.append(f"Not updated in {days_old}d")
             except Exception as _exc:
-                log.warning('%s: %s', __name__, _exc)
+                log.warning("%s: %s", __name__, _exc)
 
         # ── Factor 6: Compatible license ─────────────────────────
         license_info = repo.get("license")
@@ -784,7 +785,11 @@ def _send_telegram_report(topic, top_repos, report_path):
         from dotenv import load_dotenv
 
         load_dotenv(str(JARVIS / ".env"))
-        bot_token = os.getenv("DQIII8_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("JARVIS_BOT_TOKEN")
+        bot_token = (
+            os.getenv("DQIII8_BOT_TOKEN")
+            or os.getenv("TELEGRAM_BOT_TOKEN")
+            or os.getenv("JARVIS_BOT_TOKEN")
+        )
         chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
         if not bot_token or not chat_id:

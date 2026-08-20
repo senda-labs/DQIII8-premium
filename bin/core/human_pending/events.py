@@ -12,6 +12,7 @@ enable PRAGMA foreign_keys, so the FK to human_pending_tasks(id) is not enforced
 at runtime — callers must always insert the task row before any of its events
 (already the case, since register_and_notify() commits the INSERT first).
 """
+
 from __future__ import annotations
 
 import json

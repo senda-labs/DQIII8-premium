@@ -71,7 +71,9 @@ except ImportError:
 
 def _resolve_agent_meta(agent: str) -> dict:
     """Devuelve provider y model para el agente dado."""
-    provider, model = AGENT_ROUTING.get(agent, AGENT_ROUTING.get("default", ("groq", "llama-3.3-70b-versatile")))
+    provider, model = AGENT_ROUTING.get(
+        agent, AGENT_ROUTING.get("default", ("groq", "llama-3.3-70b-versatile"))
+    )
     return {"provider": provider, "model": model}
 
 
@@ -128,20 +130,30 @@ def dispatch(
         prompt_file = RESULTS_DIR / f"dispatch-{task_id}.prompt"
         prompt_file.write_text(full_prompt)
         pending = {
-            "task_id": task_id, "agent": agent, "status": "pending",
-            **meta, "prompt": full_prompt[:200],
+            "task_id": task_id,
+            "agent": agent,
+            "status": "pending",
+            **meta,
+            "prompt": full_prompt[:200],
             "result_file": str(result_file),
         }
         result_file.write_text(json.dumps(pending, indent=2))
         try:
             subprocess.Popen(
                 [
-                    sys.executable, str(Path(__file__).resolve()), "--_worker",
-                    "--agent", agent,
-                    "--_prompt-file", str(prompt_file),
-                    "--_result-file", str(result_file),
-                    "--_task-id", task_id,
-                    "--timeout", str(timeout),
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--_worker",
+                    "--agent",
+                    agent,
+                    "--_prompt-file",
+                    str(prompt_file),
+                    "--_result-file",
+                    str(result_file),
+                    "--_task-id",
+                    task_id,
+                    "--timeout",
+                    str(timeout),
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -190,7 +202,8 @@ def dispatch(
         result = subprocess.run(
             [sys.executable, str(WRAPPER), "--agent", agent, "--no-enrich"],
             input=full_prompt,
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
             timeout=timeout,
             cwd=str(DQIII8_ROOT),
         )
@@ -207,7 +220,7 @@ def dispatch(
         for line in (result.stderr or "").splitlines():
             if line.startswith("__DQ_META__ "):
                 try:
-                    actual_meta = json.loads(line[len("__DQ_META__ "):])
+                    actual_meta = json.loads(line[len("__DQ_META__ ") :])
                 except json.JSONDecodeError:
                     pass
                 break
@@ -226,8 +239,12 @@ def dispatch(
 
     except subprocess.TimeoutExpired:
         out = {
-            "task_id": task_id, "agent": agent, "status": "timeout",
-            "latency_ms": timeout * 1000, "response": "", **meta,
+            "task_id": task_id,
+            "agent": agent,
+            "status": "timeout",
+            "latency_ms": timeout * 1000,
+            "response": "",
+            **meta,
         }
 
     # Persistir resultado
@@ -282,8 +299,11 @@ def _run_async_worker(
         out["result_file"] = str(rf)
     except Exception as exc:
         out = {
-            "task_id": task_id, "agent": agent, "status": "error",
-            "response": "", "error": f"async worker crashed: {exc}",
+            "task_id": task_id,
+            "agent": agent,
+            "status": "error",
+            "response": "",
+            "error": f"async worker crashed: {exc}",
             "result_file": str(rf),
         }
     tmp = rf.with_name(rf.name + ".tmp")
@@ -321,13 +341,12 @@ def run_code_quality(spec: str, context: str = "", city_block_name: str = "") ->
     """
     from bin.core.code_quality import CodeQualityPipeline
 
-    result = CodeQualityPipeline().run(
-        spec=spec, context=context, city_block_name=city_block_name
-    )
+    result = CodeQualityPipeline().run(spec=spec, context=context, city_block_name=city_block_name)
     return result.__dict__
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
+
 
 def _cli():
     parser = argparse.ArgumentParser(
@@ -339,14 +358,17 @@ def _cli():
     parser.add_argument("--context-file", help="Fichero con contexto")
     parser.add_argument("--project", default="", help="Proyecto para persistir resultado")
     parser.add_argument("--timeout", "-t", type=int, default=DEFAULT_TIMEOUT)
-    parser.add_argument("--async", dest="async_mode", action="store_true",
-                        help="Modo async — devuelve task_id inmediatamente")
+    parser.add_argument(
+        "--async",
+        dest="async_mode",
+        action="store_true",
+        help="Modo async — devuelve task_id inmediatamente",
+    )
     parser.add_argument("--tasks", help="JSON file con lista de tareas para dispatch paralelo")
     parser.add_argument("--read", help="Leer resultado de task_id o fichero")
     parser.add_argument("--list-agents", action="store_true", help="Lista agentes disponibles")
     # Internal async-worker plumbing (spawned by dispatch(async_mode=True))
-    parser.add_argument("--_worker", dest="_worker", action="store_true",
-                        help=argparse.SUPPRESS)
+    parser.add_argument("--_worker", dest="_worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_prompt-file", dest="_prompt_file", help=argparse.SUPPRESS)
     parser.add_argument("--_result-file", dest="_result_file", help=argparse.SUPPRESS)
     parser.add_argument("--_task-id", dest="_task_id", help=argparse.SUPPRESS)

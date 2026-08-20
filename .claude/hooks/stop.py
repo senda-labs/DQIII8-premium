@@ -48,6 +48,7 @@ def _resolve_project() -> str:
     except Exception:
         return "dqiii8-core"
 
+
 # ── 0. Count lessons added this session ───────────────────────────
 lessons_added = 0
 result = None  # kept for instinct extraction in step 0b
@@ -66,9 +67,7 @@ try:
 
     def _count_lesson_lines(text: str) -> int:
         """Count lesson lines with format [YYYY-...]"""
-        return sum(
-            1 for l in text.splitlines() if l.startswith("- [20") or l.startswith("[20")
-        )
+        return sum(1 for l in text.splitlines() if l.startswith("- [20") or l.startswith("[20"))
 
     # Correct pattern: lines_before (HEAD) vs lines_after (working tree)
     lines_before = 0
@@ -82,18 +81,14 @@ try:
         lines_before = _count_lesson_lines(head_show.stdout)
 
     lines_after = (
-        _count_lesson_lines(LESSONS.read_text(encoding="utf-8"))
-        if LESSONS.exists()
-        else 0
+        _count_lesson_lines(LESSONS.read_text(encoding="utf-8")) if LESSONS.exists() else 0
     )
 
     lessons_added = max(0, lines_after - lines_before)
 
     # Fallback 1: git diff of working tree
     if lessons_added == 0:
-        diff_count = sum(
-            1 for line in result.stdout.splitlines() if _is_lesson_line(line)
-        )
+        diff_count = sum(1 for line in result.stdout.splitlines() if _is_lesson_line(line))
         if diff_count > 0:
             lessons_added = diff_count
 
@@ -104,9 +99,7 @@ try:
         try:
             _ts_file = Path("/tmp/dqiii8_session_start.txt")
             if _ts_file.exists():
-                _fb2_start = datetime.fromisoformat(
-                    _ts_file.read_text(encoding="utf-8").strip()
-                )
+                _fb2_start = datetime.fromisoformat(_ts_file.read_text(encoding="utf-8").strip())
         except Exception as _e:
             _log.debug("session-ts parse: %s", _e)
         log_result = subprocess.run(
@@ -131,9 +124,7 @@ try:
             sha, commit_ts_str = parts[0], parts[1].strip()
             if _fb2_start:
                 try:
-                    commit_dt = datetime.fromisoformat(commit_ts_str).replace(
-                        tzinfo=None
-                    )
+                    commit_dt = datetime.fromisoformat(commit_ts_str).replace(tzinfo=None)
                     if commit_dt < _fb2_start:
                         continue  # commit pre-dates this session — skip
                 except Exception as _e:
@@ -153,9 +144,7 @@ try:
                 text=True,
                 timeout=5,
             )
-            count2 = sum(
-                1 for line in result2.stdout.splitlines() if _is_lesson_line(line)
-            )
+            count2 = sum(1 for line in result2.stdout.splitlines() if _is_lesson_line(line))
             if count2 > 0:
                 lessons_added = count2
                 result = result2  # update for instincts
@@ -174,9 +163,7 @@ try:
             (session,),
         ).fetchone()
         if _start_row and _start_row[0]:
-            _start_iso = datetime.fromtimestamp(_start_row[0] / 1000).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            _start_iso = datetime.fromtimestamp(_start_row[0] / 1000).strftime("%Y-%m-%d %H:%M:%S")
             _vault_count = _vc.execute(
                 "SELECT COUNT(*) FROM vault_memory"
                 " WHERE source='post_tool_use' AND created_at >= ?",
@@ -201,9 +188,7 @@ try:
     _auto_count, _patterns_count = _detect(session_id=session, db_path=str(DB))
     if _auto_count:
         lessons_added += _auto_count
-        print(
-            f"[DQIII8] {_auto_count} auto-lesson(s) detected ({_patterns_count} patterns)"
-        )
+        print(f"[DQIII8] {_auto_count} auto-lesson(s) detected ({_patterns_count} patterns)")
 except Exception as _ale:
     _log.debug("auto_learner unavailable: %s", _ale)
 
@@ -232,9 +217,7 @@ try:
                 continue
             _kw = _m.group(1).strip().lower()
             _pat = _dl.strip()
-            _ex = _ic.execute(
-                "SELECT id FROM instincts WHERE keyword=?", (_kw,)
-            ).fetchone()
+            _ex = _ic.execute("SELECT id FROM instincts WHERE keyword=?", (_kw,)).fetchone()
             if _ex:
                 _ic.execute(
                     "UPDATE instincts SET times_applied=times_applied+1, last_applied=? WHERE keyword=?",
@@ -376,9 +359,7 @@ try:
                 _iconf = _iconf or 0.5
                 _root = _kw.split("-")[0].lower()
                 # Boost: keyword root appears 2+ times in vault_memory
-                _matches = len(
-                    _ire.findall(r"\b" + _ire.escape(_root) + r"\b", _vault_corpus)
-                )
+                _matches = len(_ire.findall(r"\b" + _ire.escape(_root) + r"\b", _vault_corpus))
                 if _matches >= 2:
                     _iconf = min(0.95, _iconf + 0.05)
                     _updated += 1
@@ -397,9 +378,7 @@ try:
                             _updated += 1
                     except Exception as _e:
                         _log.debug("instinct-date parse: %s", _e)
-                _ic.execute(
-                    "UPDATE instincts SET confidence=? WHERE id=?", (_iconf, _iid)
-                )
+                _ic.execute("UPDATE instincts SET confidence=? WHERE id=?", (_iconf, _iid))
             _ic.commit()
             _ic.close()
             if _updated:
@@ -603,7 +582,9 @@ try:
             )
             _tconn.commit()
             _tconn.close()
-            print(f"[DQIII8] transcript cost capture: {_grand_total} tokens across {len(_per_model)} model(s)")
+            print(
+                f"[DQIII8] transcript cost capture: {_grand_total} tokens across {len(_per_model)} model(s)"
+            )
 except Exception as e:
     _log.warning("transcript cost capture failed", exc_info=True)
 
@@ -652,11 +633,13 @@ except Exception as e:
 # -- 1d. Cleanup auto-installed Tier 3 plugins
 try:
     import sys as _pm_sys
-    _pm_sys.path.insert(0, str(JARVIS / 'bin'))
+
+    _pm_sys.path.insert(0, str(JARVIS / "bin"))
     from plugin_manager import cleanup_auto_installed
+
     _pm_removed = cleanup_auto_installed()
     if _pm_removed:
-        print(f'[DQIII8] {_pm_removed} Tier 3 plugin(s) auto-uninstalled')
+        print(f"[DQIII8] {_pm_removed} Tier 3 plugin(s) auto-uninstalled")
 except Exception as _pm_e:
     _log.debug("plugin-cleanup skipped: %s", _pm_e)
 
@@ -803,9 +786,7 @@ try:
                 _session_path = _sessions_dir / f"{_date}_session_{_idx}.md"
                 _idx += 1
 
-            _files_block = (
-                "\n".join(f"- `{f}`" for f in _files[:20]) or "- (no committed changes)"
-            )
+            _files_block = "\n".join(f"- `{f}`" for f in _files[:20]) or "- (no committed changes)"
             _duration_str = f"{int(_duration_min)}m"
             _session_md = f"""---
 date: {_date}
@@ -907,16 +888,12 @@ except Exception as _spc_e:
 
         if DB.exists():
             _fb_conn = _fb_sql.connect(str(DB), timeout=3)
-            _fb_row = _fb_conn.execute(
-                "SELECT MAX(timestamp) FROM audit_reports"
-            ).fetchone()
+            _fb_row = _fb_conn.execute("SELECT MAX(timestamp) FROM audit_reports").fetchone()
             _fb_conn.close()
             _fb_last = _fb_row[0] if _fb_row and _fb_row[0] else None
             _fb_needs = True
             if _fb_last:
-                _fb_needs = (
-                    datetime.now() - datetime.fromisoformat(_fb_last)
-                ) > timedelta(days=7)
+                _fb_needs = (datetime.now() - datetime.fromisoformat(_fb_last)) > timedelta(days=7)
             if _fb_needs:
                 (JARVIS / "tasks" / "audit_pending.flag").write_text(
                     "Audit pending — run /audit at the start of the next session."
@@ -934,9 +911,7 @@ try:
 
     if _db_path.exists():
         with _get_db(timeout=3) as _conn:
-            _total_sessions = _conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[
-                0
-            ]
+            _total_sessions = _conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
 
             _audit_row = _conn.execute(
                 "SELECT overall_score, timestamp, recommendations FROM audit_reports ORDER BY timestamp DESC LIMIT 1"

@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from bin.core.logging_config import get_logger as _get_logger
+
 log = _get_logger(__name__)
 
 import sqlite_vec
@@ -387,9 +388,7 @@ def _bench(query: str) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DQIII8 vector store")
-    parser.add_argument(
-        "--migrate", action="store_true", help="Run JSON → DB migration"
-    )
+    parser.add_argument("--migrate", action="store_true", help="Run JSON → DB migration")
     parser.add_argument("--stats", action="store_true", help="Show store stats")
     parser.add_argument("--bench", metavar="QUERY", help="Benchmark search latency")
     parser.add_argument("--search", metavar="QUERY", help="Search knowledge base")

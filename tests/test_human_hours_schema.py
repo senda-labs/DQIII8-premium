@@ -1,4 +1,5 @@
 """tests/test_human_hours_schema.py — human_hours table contract."""
+
 import sqlite3
 import subprocess
 import sys

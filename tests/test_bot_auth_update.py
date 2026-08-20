@@ -30,9 +30,7 @@ class TestCheckCredentials:
 
         creds = tmp_path / ".credentials.json"
         creds.write_text(
-            json.dumps(
-                {"claudeAiOauth": {"accessToken": "tok_a", "refreshToken": "tok_r"}}
-            ),
+            json.dumps({"claudeAiOauth": {"accessToken": "tok_a", "refreshToken": "tok_r"}}),
             encoding="utf-8",
         )
         with patch.object(mod, "_CREDENTIALS_PATH", creds):
@@ -95,9 +93,7 @@ class TestCmdAuthUpdate:
         assert "ok" in text.lower() or "valid" in text.lower()
 
     @pytest.mark.anyio
-    async def test_replies_with_login_instructions_when_credentials_missing(
-        self, tmp_path
-    ):
+    async def test_replies_with_login_instructions_when_credentials_missing(self, tmp_path):
         creds = tmp_path / "nonexistent.json"
         update = MagicMock()
         update.message.reply_text = AsyncMock()
@@ -114,22 +110,25 @@ def test_log_cc_command_writes_project(tmp_path, monkeypatch):
 
     db_path = tmp_path / "dqiii8.db"
     conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        """
+    conn.execute("""
         CREATE TABLE agent_actions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT, agent_name TEXT, tool_used TEXT, action_type TEXT,
             input_tokens INTEGER, output_tokens INTEGER, notes TEXT, project TEXT
         )
-        """
-    )
+        """)
     conn.commit()
     conn.close()
     monkeypatch.setattr(mod, "DB", db_path)
 
     mod._log_cc_command(
-        "/cc", "prompt text", "cc_direct", True, 42,
-        session_id="test-sess", project="intl-reports",
+        "/cc",
+        "prompt text",
+        "cc_direct",
+        True,
+        42,
+        session_id="test-sess",
+        project="intl-reports",
     )
 
     conn = sqlite3.connect(str(db_path))

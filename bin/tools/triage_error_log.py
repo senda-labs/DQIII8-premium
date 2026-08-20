@@ -241,7 +241,8 @@ def main():
 
     total_unresolved = conn.execute("SELECT COUNT(*) FROM error_log WHERE resolved=0").fetchone()[0]
     candidates = conn.execute(
-        f"SELECT id, action_id, session_id, agent_name, timestamp FROM error_log WHERE {where}", params
+        f"SELECT id, action_id, session_id, agent_name, timestamp FROM error_log WHERE {where}",
+        params,
     ).fetchall()
     matched = len(candidates)
     resolvable_ids, held = _correlated_ids(conn, candidates)
@@ -263,13 +264,19 @@ def main():
     aged_row = conn.execute("SELECT datetime('now', ?)", (aged_cutoff_days,)).fetchone()
     aged_cutoff = aged_row[0]
     aged_ids = [row_id for row_id, ts in held if ts <= aged_cutoff and row_id in prev_held]
-    held_fresh_ids = [row_id for row_id, ts in held if not (ts <= aged_cutoff and row_id in prev_held)]
+    held_fresh_ids = [
+        row_id for row_id, ts in held if not (ts <= aged_cutoff and row_id in prev_held)
+    ]
 
     print(f"[triage] unresolved total: {total_unresolved}")
-    print(f"[triage] whitelist match: {matched} (correlated-resolvable: {len(resolvable_ids)}, "
-          f"held for review — no successful sibling found: {len(held_fresh_ids)}, "
-          f"aged out after {HELD_REVIEW_DAYS}d unresolved: {len(aged_ids)})")
-    print(f"[triage] remaining for human review: {total_unresolved - len(resolvable_ids) - len(aged_ids)}")
+    print(
+        f"[triage] whitelist match: {matched} (correlated-resolvable: {len(resolvable_ids)}, "
+        f"held for review — no successful sibling found: {len(held_fresh_ids)}, "
+        f"aged out after {HELD_REVIEW_DAYS}d unresolved: {len(aged_ids)})"
+    )
+    print(
+        f"[triage] remaining for human review: {total_unresolved - len(resolvable_ids) - len(aged_ids)}"
+    )
 
     breakdown = conn.execute(
         f"SELECT error_type, COUNT(*) FROM error_log WHERE {where} GROUP BY error_type ORDER BY 2 DESC",
