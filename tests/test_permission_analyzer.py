@@ -1,5 +1,6 @@
 """Tests for PermissionAnalyzer v2 — ALLOWED_DELETIONS + ESCALATE."""
 
+import itertools
 import os
 import sys
 from pathlib import Path
@@ -3829,6 +3830,114 @@ def test_copy_source_is_not_a_write_target(cmd):
 def test_copy_destination_in_protected_corpus_still_caught(cmd):
     r = analyzer.evaluate("Bash", {"command": cmd})
     assert r["decision"] in ("DENY", "ESCALATE"), r
+
+
+# ── A3a (2026-08-20) — the write signal belongs to a segment, not the line ────
+# `is_write` was a bool detached from WHERE the signal fired, so every path in
+# the command inherited the verdict: `rm -f var/x && ls .claude/hooks` escalated
+# on a pure read. Segments are attributed one by one via `_write_signal`.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "rm -f var/x && ls .claude/hooks",
+        f"sed -i s/a/b/ var/x && cat {GOV_FILE}",
+        "touch var/x ; ls .claude/rules_db/",
+        "mkdir -p var/tmp || head -5 CLAUDE.md",
+        f"cp /tmp/a /tmp/b\ngrep -n x {GOV_FILE}",
+        "rm -f var/x |& cat .claude/settings.json",
+    ],
+)
+def test_read_segment_does_not_inherit_a_write_from_another_segment(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] == "APPROVE", r
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # the write is in the second segment: still caught
+        "ls var/ && echo x > CLAUDE.md",
+        f"ls var/ ; cp /tmp/evil {GOV_FILE}",
+        "ls var/ || sed -i s/a/b/ .claude/settings.json",
+        # `>|` is one operator, not a pipe followed by a target — splitting on
+        # the bare `|` used to strand the destination in its own segment
+        "ls var/ && echo x >| CLAUDE.md",
+        "ls var/ && echo x &> .claude/settings.json",
+        # cd/pushd/subshell change what a relative destination resolves against,
+        # so segmenting is refused outright
+        "cd /root/dqiii8/.claude && echo x > settings.json",
+        "pushd /root/dqiii8/.claude && echo x > settings.json",
+        "(cd /root/dqiii8/.claude && echo x > settings.json)",
+        # quotes make separators undecidable → whole command, previous behaviour
+        "echo 'a && b' > CLAUDE.md",
+        "ls var/ && bash -c 'echo x > .claude/settings.json'",
+        # opaque forms are never segmented
+        "ls var/ && echo x > $(printf CLAUDE.md)",
+    ],
+)
+def test_write_segment_is_still_caught_after_a3a(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] in ("DENY", "ESCALATE"), r
+
+
+def test_segment_attribution_invariant_over_generated_pipelines():
+    """Structural gate over every (first segment, separator, second segment,
+    protected path) combination: it must block iff the second segment writes.
+
+    The oracle comes from how each command is built, not from the analyzer. The
+    three defects the first A3a attempt shipped (a split `>|`, a cwd guard blind
+    to `pushd`, an unresolved `self`) were all invisible to a hand-written
+    control list and are caught here.
+
+    A `cd`/`pushd` first segment is the one case where segmenting is refused, so
+    the whole command is judged as one unit — a write still blocks, and a read
+    still carries no write signal at all, so the same rule covers both.
+    """
+    separators = [" && ", " || ", " ; ", " | ", "\n", " |& "]
+    moves_cwd = {"cd /root/dqiii8/.claude", "pushd /root/dqiii8/.claude"}
+    firsts = [
+        "ls var/",
+        "rm -f var/x",
+        "touch var/x",
+        "cd /root/dqiii8/.claude",
+        "pushd /root/dqiii8/.claude",
+        "sed -i s/a/b/ var/x",
+    ]
+    reads = ["ls {P}", "cat {P}", "grep -n x {P}", "head -5 {P}"]
+    writes = [
+        "echo x > {P}",
+        "echo x >> {P}",
+        "echo x >| {P}",
+        "echo x &> {P}",
+        "cp /tmp/evil {P}",
+        "mv /tmp/evil {P}",
+        "sed -i s/a/b/ {P}",
+        "tee {P} < /tmp/x",
+    ]
+    protected = [
+        "CLAUDE.md",
+        "/root/dqiii8/CLAUDE.md",
+        ".claude/settings.json",
+        GOV_FILE,
+        ".claude/rules/00_core_behavior.md",
+    ]
+
+    assert moves_cwd <= set(firsts), "the cwd-moving cases must be in the corpus"
+
+    holes, uncorrected = [], []
+    for sep, first, second, path in itertools.product(
+        separators, firsts, reads + writes, protected
+    ):
+        cmd = first + sep + second.format(P=path)
+        decision = analyzer.evaluate("Bash", {"command": cmd})["decision"]
+        if second in reads:
+            if decision != "APPROVE":
+                uncorrected.append((cmd, decision))
+        elif decision not in ("DENY", "ESCALATE"):
+            holes.append((cmd, decision))
+
+    assert not holes, f"{len(holes)} write(s) approved, e.g. {holes[:3]}"
+    assert not uncorrected, f"{len(uncorrected)} read(s) blocked, e.g. {uncorrected[:3]}"
 
 
 # The three bypasses /panel-review probed live against the Phase B narrowing,

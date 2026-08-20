@@ -2043,6 +2043,32 @@ _proc_rejection_counts: dict[str, int] = {}
 _proc_rejection_lock = _threading.Lock()
 
 
+# 2026-08-20 (A3a). Ver _simple_segments y PermissionAnalyzer._write_signal.
+# `|` solo separa si no viene de `>` o `&`: `>|` y `2>&1` son un operador, no un
+# pipe, y partirlos dejaba el destino de la redireccion en otro segmento.
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||\|&|(?<![>&])\||[;\n]")
+# `cd` cambia el cwd para el segmento siguiente, y `pushd`/`(cd ...)` igual: si
+# se separan, un destino relativo deja de resolverse contra el directorio real.
+_CWD_CHANGE_RE = re.compile(r"\b(?:cd|pushd|popd)\b|[(){}]")
+
+
+def _simple_segments(cmd: str) -> list[str] | None:
+    """Los segmentos de un pipeline demostrablemente simple, o None.
+
+    None significa "no se puede afirmar donde acaba un comando y empieza el
+    siguiente" y conserva el comportamiento anterior: el comando entero como una
+    sola unidad. Se descarta cualquier comilla a proposito — un `;` dentro de
+    comillas no es un separador, y esa confusion es la que hundio la Fase B.
+    """
+    if _OPAQUE_SHELL_RE.search(cmd) or "'" in cmd or '"' in cmd:
+        return None
+    if _CWD_CHANGE_RE.search(cmd):
+        return None
+    segs = [s.strip() for s in _SEGMENT_SPLIT_RE.split(cmd)]
+    segs = [s for s in segs if s]
+    return segs if len(segs) > 1 else None
+
+
 class PermissionAnalyzer:
     """Centralized permission evaluator for Claude Code tools."""
 
@@ -2110,6 +2136,150 @@ class PermissionAnalyzer:
             return False
         return True
 
+    def _write_signal(self, cmd: str, tool: str) -> tuple[bool, list[str] | None, dict | None]:
+        """(escribe?, destinos-de-copiador, veredicto-temprano) para CMD.
+
+        Extraida de _bash_touches_blocked sin cambios de logica, para poder
+        preguntarsela a un segmento suelto (A3a). El tercer elemento existe
+        porque la deteccion de inline-exec no resoluble escala aqui dentro:
+        el llamante lo devuelve tal cual en vez de perderlo.
+        """
+        _copy_only_dests = None
+        is_write = _bash_write_sign_hit(cmd)
+        if not is_write:
+            # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
+            if re.search(r"\b(?:sqlite3|psql|mysql|mariadb)\b", cmd):
+                if re.search(
+                    r"\b(?:INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE)\b", cmd, re.IGNORECASE
+                ):
+                    is_write = True
+        if not is_write:
+            # Detect python/perl writing inline (2026-08-18):
+            # context-mode's ctx_execute/ctx_execute_file carry raw Python
+            # source with no literal "python"/"perl" token anywhere in the
+            # text, so the substring gate never fired for that tool family —
+            # treat it as Python context unconditionally instead of requiring
+            # the token.
+            cmd_lower = cmd.lower()
+            _py_context = (
+                tool in _CTX_MODE_EXEC_TOOLS or "python" in cmd_lower or "perl" in cmd_lower
+            )
+            if _py_context and "open(" in cmd:
+                is_write = any(q in cmd for q in ("'w'", '"w"', "'a'", '"a"', "'x'", '"x"'))
+            if (
+                not is_write
+                and _py_context
+                and (
+                    "write_text(" in cmd
+                    or "write_bytes(" in cmd
+                    or re.search(r"\bshutil\.(?:copy\w*|move|rmtree)\s*\(", cmd)
+                    or re.search(r"\bos\.(?:remove|unlink|rmdir|rename|replace|truncate)\s*\(", cmd)
+                    or re.search(
+                        r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(", cmd
+                    )
+                    # [RT12] os.system/os.popen/pty.spawn hand a full shell
+                    # command to the OS; eval/exec/compile run arbitrary Python.
+                    # Both are strictly more powerful than a single file write,
+                    # so they're folded into the same is_write path rather than
+                    # a parallel blocklist — see the unresolvable-target
+                    # ESCALATE immediately below for the part a target-path
+                    # check alone can't cover.
+                    or _INLINE_EXEC_RE.search(cmd)
+                )
+            ):
+                is_write = True
+            # [RT12] A literal inline-exec argument ("os.system('ls')") is
+            # just a Bash-equivalent command and already runs through the
+            # blocked/governance/network checks elsewhere in this function
+            # (see _ctx_mode_command_text and the checks above). What those
+            # checks cannot see is a *non-literal* argument — a bare
+            # variable, `sys.argv[...]`, or an f-string — since its actual
+            # content is only known at runtime. Scoped to exactly that gap
+            # (not "ESCALATE every inline interpreter call") so that
+            # `python3 -c "import subprocess; subprocess.run(['ls'])"`
+            # keeps approving.
+            if _py_context:
+                for _m in _INLINE_EXEC_RE.finditer(cmd):
+                    _arg = _py_inline_call_first_arg(cmd, _m.end())
+                    if _arg is not None and not _py_arg_is_resolvable(_arg):
+                        return (
+                            is_write,
+                            _copy_only_dests,
+                            self._escalate(
+                                tool,
+                                cmd[:80],
+                                f"Inline Python call ('{_m.group(0)}...') passes a "
+                                "non-literal argument (variable/sys.argv/f-string) "
+                                "whose runtime value cannot be statically checked "
+                                "— human review required.",
+                                "bash_inline_exec_unresolvable_target",
+                                "Use a literal argument, or confirm the runtime "
+                                "value with the user before approving.",
+                            ),
+                        )
+        if not is_write:
+            # Detect cp/mv/rsync/install/ln/dd (incl. sudo/absolute-path prefixes,
+            # newline-separated commands) and shutil.copy*/shutil.move,
+            # os.replace/os.rename, Path.write_text/write_bytes — these overwrite
+            # a destination without any of the shell write operators above, so a
+            # blocked path was reachable via e.g. `cp x .claude/settings.json`,
+            # `sudo cp`, `/bin/cp`, a second line after `\n`, or `dd of=...`
+            # (found by stress test, 2026-08-11 — first pass covered only the
+            # bare unprefixed, single-line case).
+            _shell_copy = re.search(
+                # Las comillas cuentan como inicio: sin ellas, `bash -c 'cp x
+                # <blocked>'` no activaba is_write y se APROBABA (agujero
+                # preexistente, medido 2026-08-20). La shell anidada reejecuta
+                # su argumento como codigo, asi que ahi si empieza un comando.
+                r"(?:^|[;&|\n'\"]\s*)(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b",
+                cmd,
+                re.MULTILINE,
+            )
+            _other_copy = (
+                re.search(r"\bdd\s+(?:\S+\s+)*of=", cmd)
+                or re.search(r"\bshutil\.(?:copy\w*|move)\s*\(", cmd)
+                or re.search(r"\bos\.(?:replace|rename)\s*\(", cmd)
+                or re.search(r"\.write_(?:text|bytes)\s*\(", cmd)
+            )
+            if _shell_copy or _other_copy:
+                is_write = True
+                # A3b: si la unica señal es un copiador de shell simple, lo que
+                # se escribe es su destino. Con cualquier otra señal presente el
+                # destino ya no basta para describir el comando.
+                if _shell_copy and not _other_copy:
+                    _copy_only_dests = _copy_family_destinations(cmd)
+        if not is_write:
+            # 2026-08-18: write primitives that reach a target path
+            # without any shell write operator or a name matched above —
+            # found live against governance-path escalation: 'patch -p1',
+            # 'git apply', 'git checkout <ref> -- <path>' (the -- form only;
+            # a bare 'git checkout <branch>' just switches branches, not a
+            # write), 'tar x... -C <dir>', 'unzip ... -d <dir>', and 'ed
+            # <file>' (writes on its own 'w' command, but the file argument
+            # alone is enough to treat it as write-capable — a read-only ed
+            # session against a governance path should still be escalated
+            # for human visibility, matching the conservative bias already
+            # used above for sqlite3 DML detection).
+            _tar_mode = re.search(r"\btar\s+(-?[a-zA-Z]{1,8})\b", cmd)
+            if (
+                re.search(r"\bpatch\b", cmd)
+                or re.search(r"\bgit\s+apply\b", cmd)
+                or re.search(r"\bgit\s+checkout\b[^|;&\n]*--", cmd)
+                or (_tar_mode and "x" in _tar_mode.group(1).lower())
+                or _archive_dest_dirs(cmd)
+                or re.search(r"\btar\b[^|;&\n]*--extract\b", cmd)
+                or re.search(r"\bunzip\b", cmd)
+                or re.search(r"(?:^|[\s;&|])ed\s+\S", cmd)
+            ):
+                is_write = True
+        if not is_write:
+            # 2026-08-18: sed --in-place, perl -i, interactive
+            # editors, curl/wget -o/-O, and touch/mkdir/chmod/chown/ln all
+            # write or create a target with none of the signs above present.
+            if any(p.search(cmd) for p in _BASH_WRITE_SIGN_PATTERNS):
+                is_write = True
+        return is_write, _copy_only_dests, None
+
     def _bash_touches_blocked(self, cmd: str, tool: str = "Bash") -> dict | None:
         """Block Bash (or a context-mode exec-equivalent) commands that
         read credential paths or write to any blocked path.
@@ -2176,136 +2346,9 @@ class PermissionAnalyzer:
                     "Reference the file explicitly, or use os.environ.get() for secrets.",
                 )
         # 2. All BLOCKED_PATHS — block write operations
-        _copy_only_dests = None
-        is_write = _bash_write_sign_hit(cmd)
-        if not is_write:
-            # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
-            if re.search(r"\b(?:sqlite3|psql|mysql|mariadb)\b", cmd):
-                if re.search(
-                    r"\b(?:INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|REPLACE)\b", cmd, re.IGNORECASE
-                ):
-                    is_write = True
-        if not is_write:
-            # Detect python/perl writing inline (2026-08-18):
-            # context-mode's ctx_execute/ctx_execute_file carry raw Python
-            # source with no literal "python"/"perl" token anywhere in the
-            # text, so the substring gate never fired for that tool family —
-            # treat it as Python context unconditionally instead of requiring
-            # the token.
-            cmd_lower = cmd.lower()
-            _py_context = (
-                tool in _CTX_MODE_EXEC_TOOLS or "python" in cmd_lower or "perl" in cmd_lower
-            )
-            if _py_context and "open(" in cmd:
-                is_write = any(q in cmd for q in ("'w'", '"w"', "'a'", '"a"', "'x'", '"x"'))
-            if (
-                not is_write
-                and _py_context
-                and (
-                    "write_text(" in cmd
-                    or "write_bytes(" in cmd
-                    or re.search(r"\bshutil\.(?:copy\w*|move|rmtree)\s*\(", cmd)
-                    or re.search(r"\bos\.(?:remove|unlink|rmdir|rename|replace|truncate)\s*\(", cmd)
-                    or re.search(
-                        r"\bsubprocess\.(?:run|Popen|call|check_call|check_output)\s*\(", cmd
-                    )
-                    # [RT12] os.system/os.popen/pty.spawn hand a full shell
-                    # command to the OS; eval/exec/compile run arbitrary Python.
-                    # Both are strictly more powerful than a single file write,
-                    # so they're folded into the same is_write path rather than
-                    # a parallel blocklist — see the unresolvable-target
-                    # ESCALATE immediately below for the part a target-path
-                    # check alone can't cover.
-                    or _INLINE_EXEC_RE.search(cmd)
-                )
-            ):
-                is_write = True
-            # [RT12] A literal inline-exec argument ("os.system('ls')") is
-            # just a Bash-equivalent command and already runs through the
-            # blocked/governance/network checks elsewhere in this function
-            # (see _ctx_mode_command_text and the checks above). What those
-            # checks cannot see is a *non-literal* argument — a bare
-            # variable, `sys.argv[...]`, or an f-string — since its actual
-            # content is only known at runtime. Scoped to exactly that gap
-            # (not "ESCALATE every inline interpreter call") so that
-            # `python3 -c "import subprocess; subprocess.run(['ls'])"`
-            # keeps approving.
-            if _py_context:
-                for _m in _INLINE_EXEC_RE.finditer(cmd):
-                    _arg = _py_inline_call_first_arg(cmd, _m.end())
-                    if _arg is not None and not _py_arg_is_resolvable(_arg):
-                        return self._escalate(
-                            tool,
-                            cmd[:80],
-                            f"Inline Python call ('{_m.group(0)}...') passes a "
-                            "non-literal argument (variable/sys.argv/f-string) "
-                            "whose runtime value cannot be statically checked "
-                            "— human review required.",
-                            "bash_inline_exec_unresolvable_target",
-                            "Use a literal argument, or confirm the runtime "
-                            "value with the user before approving.",
-                        )
-        if not is_write:
-            # Detect cp/mv/rsync/install/ln/dd (incl. sudo/absolute-path prefixes,
-            # newline-separated commands) and shutil.copy*/shutil.move,
-            # os.replace/os.rename, Path.write_text/write_bytes — these overwrite
-            # a destination without any of the shell write operators above, so a
-            # blocked path was reachable via e.g. `cp x .claude/settings.json`,
-            # `sudo cp`, `/bin/cp`, a second line after `\n`, or `dd of=...`
-            # (found by stress test, 2026-08-11 — first pass covered only the
-            # bare unprefixed, single-line case).
-            _shell_copy = re.search(
-                # Las comillas cuentan como inicio: sin ellas, `bash -c 'cp x
-                # <blocked>'` no activaba is_write y se APROBABA (agujero
-                # preexistente, medido 2026-08-20). La shell anidada reejecuta
-                # su argumento como codigo, asi que ahi si empieza un comando.
-                r"(?:^|[;&|\n'\"]\s*)(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b",
-                cmd,
-                re.MULTILINE,
-            )
-            _other_copy = (
-                re.search(r"\bdd\s+(?:\S+\s+)*of=", cmd)
-                or re.search(r"\bshutil\.(?:copy\w*|move)\s*\(", cmd)
-                or re.search(r"\bos\.(?:replace|rename)\s*\(", cmd)
-                or re.search(r"\.write_(?:text|bytes)\s*\(", cmd)
-            )
-            if _shell_copy or _other_copy:
-                is_write = True
-                # A3b: si la unica señal es un copiador de shell simple, lo que
-                # se escribe es su destino. Con cualquier otra señal presente el
-                # destino ya no basta para describir el comando.
-                if _shell_copy and not _other_copy:
-                    _copy_only_dests = _copy_family_destinations(cmd)
-        if not is_write:
-            # 2026-08-18: write primitives that reach a target path
-            # without any shell write operator or a name matched above —
-            # found live against governance-path escalation: 'patch -p1',
-            # 'git apply', 'git checkout <ref> -- <path>' (the -- form only;
-            # a bare 'git checkout <branch>' just switches branches, not a
-            # write), 'tar x... -C <dir>', 'unzip ... -d <dir>', and 'ed
-            # <file>' (writes on its own 'w' command, but the file argument
-            # alone is enough to treat it as write-capable — a read-only ed
-            # session against a governance path should still be escalated
-            # for human visibility, matching the conservative bias already
-            # used above for sqlite3 DML detection).
-            _tar_mode = re.search(r"\btar\s+(-?[a-zA-Z]{1,8})\b", cmd)
-            if (
-                re.search(r"\bpatch\b", cmd)
-                or re.search(r"\bgit\s+apply\b", cmd)
-                or re.search(r"\bgit\s+checkout\b[^|;&\n]*--", cmd)
-                or (_tar_mode and "x" in _tar_mode.group(1).lower())
-                or _archive_dest_dirs(cmd)
-                or re.search(r"\btar\b[^|;&\n]*--extract\b", cmd)
-                or re.search(r"\bunzip\b", cmd)
-                or re.search(r"(?:^|[\s;&|])ed\s+\S", cmd)
-            ):
-                is_write = True
-        if not is_write:
-            # 2026-08-18: sed --in-place, perl -i, interactive
-            # editors, curl/wget -o/-O, and touch/mkdir/chmod/chown/ln all
-            # write or create a target with none of the signs above present.
-            if any(p.search(cmd) for p in _BASH_WRITE_SIGN_PATTERNS):
-                is_write = True
+        is_write, _copy_only_dests, _early = self._write_signal(cmd, tool)
+        if _early:
+            return _early
         if is_write:
             # 2026-08-18: match against the raw command,
             # the quote/backslash-collapsed command, and every relative
@@ -2314,7 +2357,17 @@ class PermissionAnalyzer:
             # `cd /root/dqiii8/.claude && echo x > settings.json` (the
             # blocked token never appears literally) and quote/backslash
             # splicing (`CLA''UDE.md`, `CLA\UDE.md`).
-            _targets = _bash_resolved_write_targets(cmd, _copy_only_dests)
+            # A3a: cada segmento aporta candidatos solo si el segmento
+            # mismo escribe. Sin segmentacion, el comando entero como antes.
+            _segments = _simple_segments(cmd)
+            if _segments:
+                _targets = []
+                for _seg in _segments:
+                    _seg_write, _seg_dests, _ = self._write_signal(_seg, tool)
+                    if _seg_write:
+                        _targets.extend(_bash_resolved_write_targets(_seg, _seg_dests))
+            else:
+                _targets = _bash_resolved_write_targets(cmd, _copy_only_dests)
             blocked = next((h for h in (_blocked_path_hit(t) for t in _targets) if h), None)
             if blocked:
                 return self._deny(
