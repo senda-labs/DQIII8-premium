@@ -11,9 +11,10 @@ El número de archivos del registro no se cita aquí: el recuento vivo es
 RANGO CANÓNICO (medido con token_estimate(), cl100k_base real vía tiktoken):
 **suelo 1211** (solo _ALWAYS = ops + core-behavior), **techo 9123**. Suelo de
 sesión 2599 (suelo + CLAUDE.md, el único fichero que Claude Code auto-inyecta en
-toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md; techo
-re-medido el mismo día tras añadir la sección "SendMessage — sin secretos crudos"
-a common/agents.md (Rango 15, red-team audit).
+toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md. Techo
+re-medido 2026-08-20 tras editar 01_database_mutations.md y
+02_hooks_and_permissions.md; el margen sobre el valor anterior era cero, así que
+cualquier añadido a un fichero inyectado obliga a repetir esta medida.
 
 El techo es el MÁXIMO REALMENTE ALCANZABLE, no el peor caso de la matriz
 representativa: un Bash que combina todas las keywords de _BASH_KEYWORD_RULES
