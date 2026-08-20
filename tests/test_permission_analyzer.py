@@ -3880,6 +3880,69 @@ def test_write_segment_is_still_caught_after_a3a(cmd):
     assert r["decision"] in ("DENY", "ESCALATE"), r
 
 
+# ── A4 (2026-08-20) — quoted SQL is data, not shell syntax ───────────────────
+# `sqlite3 db "SELECT count(*) FROM t"` denied as bash_credential_glob (the `*`
+# read as a glob) and `... WHERE id > 1` as a write to dqiii8.db (the `>` read as
+# a redirect). Both are the procedure `01_database_mutations.md` mandates, so the
+# analyzer was blocking its own documentation. Pre-existing, identical at bde1747.
+LIVE_DB = "/root/dqiii8/database/dqiii8.db"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT count(*) FROM agent_actions;",
+        "SELECT * FROM instincts LIMIT 5;",
+        "SELECT count(*) FROM sqlite_master WHERE name='routing_feedback';",
+        "PRAGMA table_info(agent_actions);",
+        "SELECT * FROM agent_actions WHERE id > 1;",
+        "EXPLAIN QUERY PLAN SELECT * FROM agent_actions WHERE id > 1;",
+        "WITH t AS (SELECT * FROM instincts) SELECT count(*) FROM t;",
+    ],
+)
+def test_quoted_sql_is_not_shell_syntax(sql):
+    r = analyzer.evaluate("Bash", {"command": f'sqlite3 {LIVE_DB} "{sql}"'})
+    assert r["decision"] == "APPROVE", r
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # a real glob outside the SQL literal voids the exemption for all of them
+        f'sqlite3 {LIVE_DB} "SELECT * FROM t" && cat *',
+        f'sqlite3 {LIVE_DB} "SELECT * FROM t" ; cat .e*',
+        f'sqlite3 {LIVE_DB} "SELECT * FROM t" && python3 -c "import glob;glob.glob(\'*\')"',
+        # a SQL verb does not make a non-DB-client command inert: python expands
+        # its own quoted glob
+        "python3 -c \"SELECT * FROM t; import glob; glob.glob('*')\"",
+        # sqlite3 runs dot-commands from the argument, and .shell/.system spawn a
+        # process — measured live: the first cut of A4 approved these
+        f'sqlite3 {LIVE_DB} "SELECT 1; .shell cat .e*"',
+        f'sqlite3 {LIVE_DB} "SELECT 1; .system cat .e*"',
+        f'sqlite3 {LIVE_DB} "SELECT 1;\n.shell cat .e*"',
+        # unbalanced quotes have no span at all → previous behaviour
+        f'sqlite3 {LIVE_DB} "SELECT * FROM t',
+        # the SQL guards are independent of this exemption
+        f'sqlite3 {LIVE_DB} "DROP TABLE agent_actions;"',
+        f'sqlite3 {LIVE_DB} "DELETE FROM agent_actions;"',
+        f'sqlite3 {LIVE_DB} "UPDATE learned_approvals SET confidence=1;"',
+        f'sqlite3 {LIVE_DB} "INSERT INTO learned_approvals VALUES (1);"',
+        # a path outside the literal is still a path
+        f'sqlite3 {LIVE_DB} "SELECT * FROM t" > /root/dqiii8/CLAUDE.md',
+        f'sqlite3 {LIVE_DB} "SELECT * FROM t" >> /root/dqiii8/.claude/settings.json',
+        'sqlite3 /root/dqiii8/.env "SELECT * FROM t;"',
+        f"sqlite3 {LIVE_DB} \"ATTACH DATABASE '/root/dqiii8/.env' AS e;\"",
+        f"sqlite3 {LIVE_DB} \"VACUUM INTO '/root/dqiii8/CLAUDE.md';\"",
+        # a real write in another segment survives the masking
+        f'sqlite3 {LIVE_DB} "SELECT * FROM t WHERE a > 1" && echo x > /root/dqiii8/CLAUDE.md',
+        f"bash -c 'sqlite3 {LIVE_DB} \"SELECT * FROM t\" && cat .env'",
+    ],
+)
+def test_sql_exemption_opens_nothing(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] in ("DENY", "ESCALATE"), r
+
+
 def test_segment_attribution_invariant_over_generated_pipelines():
     """Structural gate over every (first segment, separator, second segment,
     protected path) combination: it must block iff the second segment writes.

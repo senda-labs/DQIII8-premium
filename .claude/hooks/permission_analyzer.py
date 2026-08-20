@@ -541,6 +541,67 @@ def _credential_glob_hit(token: str) -> str | None:
     return None
 
 
+# 2026-08-20 (A4). Ver _sql_literal_spans.
+_DB_CLIENT_RE = re.compile(r"^\s*(?:sqlite3|psql|mysql|mariadb|duckdb)\b")
+_SQL_STATEMENT_RE = re.compile(
+    r"^\s*(?:SELECT|WITH|PRAGMA|EXPLAIN|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER"
+    r"|VACUUM|ATTACH|BEGIN|COMMIT|REPLACE)\b",
+    re.IGNORECASE,
+)
+_QUOTED_SPAN_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+# Un dot-command de sqlite3 al principio de una sentencia. `.shell`/`.system`
+# lanzan un proceso y `.import`/`.output` tocan ficheros, asi que el argumento
+# deja de ser dato inerte: medido en vivo, `"SELECT 1; .shell cat .e*"` pasaba
+# de DENY a APPROVE con la primera version de este parche.
+_SQL_DOT_COMMAND_RE = re.compile(r"(?:^|[;\n])\s*\.")
+
+
+def _sql_literal_spans(cmd: str) -> list[tuple[int, int]]:
+    """Tramos de CMD que son una sentencia SQL entrecomillada, o lista vacia.
+
+    Se exige que el comando sea un cliente de DB: un metacaracter citado dentro
+    de `python3 -c "..."` SI lo expande el programa, y ese caso debe seguir
+    denegando aunque el texto contenga verbos SQL. Por la misma razon se
+    descarta cualquier literal con un dot-command.
+    """
+    if not _DB_CLIENT_RE.match(cmd):
+        return []
+    spans = []
+    for m in _QUOTED_SPAN_RE.finditer(cmd):
+        body = m.group(1) if m.group(1) is not None else m.group(2)
+        if _SQL_STATEMENT_RE.match(body) and not _SQL_DOT_COMMAND_RE.search(body):
+            spans.append(m.span())
+    return spans
+
+
+def _globs_are_sql_only(cmd: str) -> bool:
+    """True si TODO glob del comando vive dentro de un literal SQL."""
+    spans = _sql_literal_spans(cmd)
+    if not spans:
+        return False
+    return all(
+        any(start <= m.start() and m.end() <= end for start, end in spans)
+        for m in _GLOB_WILDCARD_RE.finditer(cmd)
+    )
+
+
+def _mask_sql_literals(cmd: str) -> str:
+    """CMD con el interior de cada literal SQL neutralizado, misma longitud.
+
+    Deja las comillas en su sitio y sustituye el contenido, de modo que
+    `WHERE id > 1` deja de parecer una redireccion sin mover ningun offset ni
+    ocultar nada que este FUERA del literal.
+    """
+    spans = _sql_literal_spans(cmd)
+    if not spans:
+        return cmd
+    out = list(cmd)
+    for start, end in spans:
+        for i in range(start + 1, end - 1):
+            out[i] = "x"
+    return "".join(out)
+
+
 def _collapse_adjacent_quotes(cmd: str) -> str:
     """Collapse Bash's directly-adjacent-quote string concatenation.
 
@@ -2145,7 +2206,8 @@ class PermissionAnalyzer:
         el llamante lo devuelve tal cual en vez de perderlo.
         """
         _copy_only_dests = None
-        is_write = _bash_write_sign_hit(cmd)
+        # A4: `WHERE id > 1` dentro del literal SQL no es una redireccion.
+        is_write = _bash_write_sign_hit(_mask_sql_literals(cmd))
         if not is_write:
             # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
             if re.search(r"\b(?:sqlite3|psql|mysql|mariadb)\b", cmd):
@@ -2312,6 +2374,8 @@ class PermissionAnalyzer:
         # from the raw command. `cmd` itself is untouched; every other check
         # in this function still sees the original string.
         _cred_cmd = _collapse_adjacent_quotes(cmd)
+        # A4: un `*` de SQL citado no es un glob de ficheros.
+        _sql_globs = _globs_are_sql_only(_cred_cmd)
         _recent: list[str] = []
         for tok in _BASH_TOKEN_SPLIT_RE.split(_cred_cmd):
             tok = tok.strip().strip("'\"")
@@ -2335,7 +2399,7 @@ class PermissionAnalyzer:
             # match, but it can still be crafted to expand onto a known
             # credential file. Ask the reverse question via fnmatch.
             glob_hit = _credential_glob_hit(tok)
-            if glob_hit and not _is_glob_exclusion_argument(_prev):
+            if glob_hit and not _sql_globs and not _is_glob_exclusion_argument(_prev):
                 return self._deny(
                     tool,
                     cmd,
