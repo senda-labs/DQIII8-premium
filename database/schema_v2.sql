@@ -1237,16 +1237,6 @@ CREATE TABLE IF NOT EXISTS cc_rate_limit (
                 chat_id TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-CREATE TABLE IF NOT EXISTS chunk_health (
-    chunk_id    INTEGER PRIMARY KEY,
-    domain      TEXT    DEFAULT '',
-    redundancy_score REAL DEFAULT 0.5,
-    freshness   TEXT    DEFAULT 'unknown',
-    usage_30d   INTEGER DEFAULT 0,
-    verdict     TEXT    DEFAULT 'keep',
-    reviewed_at TEXT    DEFAULT (datetime('now')),
-    FOREIGN KEY (chunk_id) REFERENCES vector_chunks(id)
-);
 -- Stage 5 (2026-08-13): rows with source='claude_code_transcript' are written
 -- by stop.py from the Claude Code transcript JSONL. cost_estimate there is
 -- LIST-PRICE-EQUIVALENT, not billed spend — this VPS runs Claude Max OAuth

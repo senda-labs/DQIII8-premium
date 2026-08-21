@@ -250,6 +250,38 @@ _SQL_PATHISH_RE = re.compile(
 )
 
 
+_PATHISH_KEY_TOKENS = ("path", "dest", "target", "file")
+
+
+def _path_like_values(obj) -> list[str]:
+    """Values found under a path-shaped key, anywhere in a nested dict/list.
+
+    Fallback candidate source for MCP tool families whose write target can
+    appear under an unpredictable or renamed key (see mcp__github__ write-
+    shaped handling in _candidate_paths) -- an unrecognized top-level key
+    (e.g. "repo_path") or a renamed array (e.g. "files" -> "updates") both
+    still carry the value under a key whose *name* is path-shaped, so this
+    recurses unconditionally but only extracts leaves at a path-shaped key.
+    Deliberately NOT a blanket string-leaf scan: free-text fields (PR body,
+    commit message) can legitimately mention a sensitive-looking substring
+    without being a write target, and would false-positive under that.
+    """
+    out: list[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = k.lower()
+            if kl in _MCP_PATH_KEYS or any(tok in kl for tok in _PATHISH_KEY_TOKENS):
+                if isinstance(v, str) and v:
+                    out.append(v)
+                elif isinstance(v, (list, tuple)):
+                    out.extend(x for x in v if isinstance(x, str) and x)
+            out.extend(_path_like_values(v))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            out.extend(_path_like_values(v))
+    return out
+
+
 def _sql_candidate_paths(sql: str) -> list[str]:
     """Filesystem paths a SQL string could write to or read from."""
     if not sql:
@@ -322,6 +354,10 @@ def _candidate_paths(tool: str, tool_input: dict) -> list[str]:
                         p = f.get("path")
                         if isinstance(p, str) and p:
                             paths.append(p)
+            # 2026-08-21: fallback for any key name/shape not covered above
+            # (unrecognized top-level key, or "files" renamed by a future
+            # API/wrapper) -- fail closed rather than trust the fixed list.
+            paths.extend(_path_like_values(inp))
         # Any MCP tool that takes SQL is a filesystem actor via ATTACH/VACUUM,
         # regardless of which server exposes it.
         for key in ("sql", "query", "statement"):
@@ -408,11 +444,21 @@ def _blocked_path_hit(path: str) -> str | None:
 
 def _governance_path_hit(path: str) -> str | None:
     """The GOVERNANCE_PATHS token a path matches, or None."""
-    for cand in _path_match_candidates(path):
+    candidates = _path_match_candidates(path)
+    for cand in candidates:
         normalized = cand.replace("\\", "/")
         for gov in (*GOVERNANCE_PATHS, *_downgraded()):
             if gov in normalized:
                 return gov
+    # 2026-08-21: a write/extract *target directory* that IS the governance
+    # root itself (not a file merely nested under it -- .claude/commands/
+    # checkpoint.md must stay APPROVE) matched none of the named-subdir
+    # tokens above and slipped through, e.g. `unzip -d .claude/ archive.zip`.
+    # Equality-based, not substring, so it never fires for a nested path.
+    for cand in candidates:
+        stripped = cand.replace("\\", "/").rstrip("/")
+        if stripped == ".claude" or stripped.endswith("/.claude"):
+            return ".claude/"
     return None
 
 
@@ -1066,6 +1112,8 @@ def _copy_family_destinations(cmd: str) -> list[str] | None:
         return None
     if _CMD_SEPARATOR_RE.search(cmd):
         return None
+    if re.search(r"[<>]", cmd):
+        return None  # redirection operator: destination unclear, fall back to whole-command match (panel-review 2026-08-21, P1)
     collapsed = _collapse_adjacent_quotes(cmd).strip()
     if not _COPY_FAMILY_RE.match(collapsed):
         return None
@@ -2350,14 +2398,41 @@ def _simple_segments(cmd: str) -> list[str] | None:
 
     None significa "no se puede afirmar donde acaba un comando y empieza el
     siguiente" y conserva el comportamiento anterior: el comando entero como una
-    sola unidad. Se descarta cualquier comilla a proposito — un `;` dentro de
-    comillas no es un separador, y esa confusion es la que hundio la Fase B.
+    sola unidad. Un `;` dentro de comillas no es un separador (la confusion que
+    hundio la Fase B) — pero antes se resolvia descartando la segmentacion
+    entera ante CUALQUIER comilla, aunque estuviera balanceada y fuera de
+    contenido irrelevante al separador (p.ej. `echo "...$?..."` al final de un
+    pipeline compuesto). Eso hacia caer todo el comando al fallback de
+    coincidencia de substring contra el comando entero, que no distingue un
+    path que aparece como fuente de `<` (lectura) de un path realmente
+    escrito — falso positivo confirmado (2026-08-21, stress test). Con
+    comillas balanceadas, se enmascara solo su interior (mismo patron que
+    _mask_quotes_for_readonly) y se buscan separadores fuera de ese
+    enmascarado; los segmentos se recortan del CMD original por posicion, asi
+    que el contenido real de las comillas no se pierde para el analisis
+    posterior de cada segmento.
     """
-    if _OPAQUE_SHELL_RE.search(cmd) or "'" in cmd or '"' in cmd:
+    if _OPAQUE_SHELL_RE.search(cmd):
         return None
     if _CWD_CHANGE_RE.search(cmd):
         return None
-    segs = [s.strip() for s in _SEGMENT_SPLIT_RE.split(cmd)]
+    if cmd.count("'") % 2 or cmd.count('"') % 2:
+        return None
+    masked = list(cmd)
+    for m in _QUOTED_SPAN_RE.finditer(cmd):
+        start, end = m.span()
+        for i in range(start + 1, end - 1):
+            masked[i] = "x"
+    masked_str = "".join(masked)
+    matches = list(_SEGMENT_SPLIT_RE.finditer(masked_str))
+    if not matches:
+        return None
+    segs = []
+    last = 0
+    for m in matches:
+        segs.append(cmd[last : m.start()].strip())
+        last = m.end()
+    segs.append(cmd[last:].strip())
     segs = [s for s in segs if s]
     return segs if len(segs) > 1 else None
 
@@ -2527,7 +2602,7 @@ class PermissionAnalyzer:
                 # <blocked>'` no activaba is_write y se APROBABA (agujero
                 # preexistente, medido 2026-08-20). La shell anidada reejecuta
                 # su argumento como codigo, asi que ahi si empieza un comando.
-                r"(?:^|[;&|\n'\"]\s*)(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b",
+                r"(?:^|[;&|\n]\s*|['\"])(?:sudo\s+)?(?:[\w./-]*/)?(?:cp|mv|rsync|install|ln)\b",
                 cmd,
                 re.MULTILINE,
             )
@@ -2678,7 +2753,11 @@ class PermissionAnalyzer:
                 )
             # Governance corpus via shell: same policy as the Edit/Write
             # and MCP routes — escalate, never silently allow.
-            gov = next((h for h in (_governance_path_hit(t) for t in _targets) if h), None)
+            _gov_hits = [h for h in (_governance_path_hit(t) for t in _targets) if h]
+            # most-specific-wins: several resolved Bash targets can share
+            # this list, and a coarse .claude/ root hit must never shadow a
+            # more specific named-subdir hit found on another target.
+            gov = max(_gov_hits, key=len) if _gov_hits else None
             if gov:
                 return self._escalate(
                     tool,
