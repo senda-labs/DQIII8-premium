@@ -36,6 +36,152 @@ KNOWN_EXPLAINED = [
         "non-Anthropic providers non-operational since NIM 403 on 2026-08-16.",
         ".claude/rules/00_core_behavior.md #REGLA NIM",
     ),
+    # 2026-08-21: individually reviewed all 69 rows unresolved at the time
+    # (see git log for this file). Each pattern below is a distinct root
+    # cause, not a blanket sweep -- rows with no stored detail beyond an
+    # exit code, or with only a partial/ambiguous message, were left
+    # unresolved rather than guessed at.
+    (
+        "ReadError",
+        "File content (%) exceeds maximum allowed tokens%",
+        "Expected: Read tool's own token-limit guard, working as designed "
+        "(the message itself instructs using offset/limit). Not a defect.",
+        "Read tool built-in behavior",
+    ),
+    (
+        "ReadError",
+        "EISDIR: illegal operation on a directory%",
+        "Expected: Read was called on a directory path, not a file. "
+        "Correct failure mode, not a defect.",
+        "Node fs EISDIR semantics",
+    ),
+    (
+        "ReadError",
+        "File does not exist. Note: your current working directory%",
+        "Expected: Read attempted on a path that does not exist during "
+        "normal exploration. Not a defect.",
+        "Read tool built-in behavior",
+    ),
+    (
+        "BashError",
+        "%ignored by one of your .gitignore files%",
+        "Not an error: git correctly refused to add gitignored-only paths "
+        "and exited nonzero to signal it. Matches the documented "
+        "gitignore-respecting `git add` protocol.",
+        ".claude/rules_db/git-safety.md #Git add protocol",
+    ),
+    (
+        "BashError",
+        "%alias: dqa: not found%",
+        "Documented gotcha: aliases are not available in non-interactive "
+        "Bash. Use the full sqlite3 path instead of the `dqa` alias.",
+        ".claude/rules_db/git-safety.md #Bash rules",
+    ),
+    (
+        "BashError",
+        "%database/schema.sql: No such file or directory%",
+        "Expected: database/schema.sql was renamed/removed; "
+        "database/schema_v2.sql is the sole schema SSOT.",
+        "CLAUDE.md #Exigencias no negociables",
+    ),
+    (
+        "BashError",
+        "%bun: command not found%",
+        "Environment gap since fixed -- bun is installed and resolvable "
+        "on PATH as of this triage run (verified with `which bun`).",
+        "verified 2026-08-21",
+    ),
+    (
+        "BashError",
+        "%veredictos cambiados%",
+        "Expected: Fase A stress-test harness output (permission_analyzer.py "
+        "corpus regression runs), nonzero exit is the harness's own "
+        "review-me signal, not an application bug.",
+        "git log Fase A commits (A3a-A7), 2026-08-20/21",
+    ),
+    (
+        "BashError",
+        "%FP sin corregir%adversariales%",
+        "Expected: same Fase A stress-test harness, false-positive-tracking "
+        "report variant. Nonzero exit is the harness's review-me signal, "
+        "not an application bug -- the FPs it lists were fixed by "
+        "subsequent Fase A commits.",
+        "git log Fase A commits (A3a-A7), 2026-08-20/21",
+    ),
+    (
+        "BashError",
+        "%SELECT ts, score FROM audit_reports%",
+        "One-off ad-hoc scratch query typo (audit_reports has no `ts`/`score` "
+        "columns -- real columns are `timestamp`/`overall_score`). No "
+        "production script uses this query (grep-verified); scratch-only.",
+        "verified 2026-08-21 via .schema audit_reports + grep",
+    ),
+    (
+        "BashError",
+        "%HEALTH SCORE:%WARNING%",
+        "Expected: /audit exits nonzero on a WARNING-tier health score by "
+        "design, to make the report visible. The underlying low "
+        "error-resolution-rate finding is what this triage run addresses.",
+        ".claude/skills/audit/SKILL.md #Score interpretation",
+    ),
+    (
+        "BashError",
+        "%dict%object has no attribute%decision%",
+        "One-off ad-hoc scratch script bug (used r.decision instead of "
+        "r['decision'] on a dict). No production code affected.",
+        "scratch-only, 2026-08-21 disaster-scenario testing",
+    ),
+    (
+        "BashError",
+        "%no such module: vec0%",
+        "One-off ad-hoc scratch script omitted loading the sqlite-vec "
+        "extension before querying a vec0 virtual table. No production "
+        "code affected.",
+        "scratch-only, 2026-08-21 DB investigation",
+    ),
+    (
+        "BashError",
+        "%unexpected token `&%",
+        "One-off scratch command bug: an unquoted `&` inside a real "
+        "project directory name (m&a-assignment) broke bash's for-loop "
+        "list parsing. No production code affected.",
+        "scratch-only, 2026-08-21 orphan-project audit",
+    ),
+    (
+        "BashError",
+        "%cites `scripts/save_response.py`%",
+        "Cause identified and fixed: the stale citation this pre-commit "
+        "warning flagged was corrected in intl-reports-ops.md.",
+        "commit b618d6d, 2026-08-21",
+    ),
+    (
+        "ScheduleWakeupError",
+        "%prompt` is required when%stop%",
+        "One-off tool-call mistake: ScheduleWakeup called without `prompt` "
+        "while not stopping. Self-correcting -- no downstream effect.",
+        "scratch-only, 2026-08-21 background-work call",
+    ),
+    (
+        "mcp__dqiii8-db__executeError",
+        "%SQL too long%",
+        "Expected: MCP server enforces a 1000-char SQL length cap. Not a "
+        "defect -- the caller should chunk or simplify the statement.",
+        "MCP server built-in limit",
+    ),
+    (
+        "mcp__dqiii8-db__queryError",
+        "%no such column: summary%",
+        "Documented gotcha: error_log has no `summary` column. Already "
+        "codified as a known pitfall.",
+        ".claude/rules/01_database_mutations.md #error_log",
+    ),
+    (
+        "mcp__filesystem__write_fileError",
+        "%Access denied - path outside allowed directories%",
+        "Expected: filesystem MCP server correctly enforced its sandbox "
+        "boundary. Security control working as designed, not a defect.",
+        "mcp__filesystem__* sandbox enforcement",
+    ),
 ]
 
 
