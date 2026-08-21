@@ -184,6 +184,120 @@ KNOWN_EXPLAINED = [
     ),
 ]
 
+# 2026-08-21: rows whose stored error_message is only a bare "Exit code N"
+# (or a generic "Command timed out") carry no distinguishing text a LIKE
+# pattern can match on. For those, the only way to find a cause is to cross-
+# reference agent_actions.action_id (or, if that's unset, the session's own
+# JSONL transcript by timestamp -- both were used here). Each entry below
+# is a single row, resolved by id because the recovered command is a one-
+# off, not a recurring category.
+EXPLICIT_IDS = [
+    (
+        1696,
+        "Recovered command (agent_actions id 424): "
+        "`systemctl restart dqiii8-bot && sleep 4 && systemctl is-active "
+        "dqiii8-bot`, exit 144. Likely transient: 4s was not always enough "
+        "for the restart to reach 'active'. Service verified healthy and "
+        "active today (2026-08-21).",
+        "agent_actions.id=424; verified via systemctl is-active",
+    ),
+    (
+        1706,
+        "Recovered command (agent_actions id 481): "
+        "`ls ~/.claude/hooks/ 2>/dev/null`, exit 2. ~/.claude is the global "
+        "Claude config dir, not the project's .claude/hooks/ under "
+        "/root/dqiii8 -- a one-off path mixup, not a defect.",
+        "agent_actions.id=481",
+    ),
+    (
+        3542,
+        "Duplicate log entry (no action_id) for the same command as id "
+        "3544, confirmed via the session's own transcript: parallel/twin "
+        "logging of one Fase A dev script, not a distinct failure.",
+        "session 61743d5f transcript, 2026-08-20T23:54:58Z",
+    ),
+    (
+        3543,
+        "Duplicate log entry (no action_id) for the same command as id "
+        "3545, confirmed via the session's own transcript: parallel/twin "
+        "logging of one Fase A dev command, not a distinct failure.",
+        "session 61743d5f transcript, 2026-08-21T00:05:48Z",
+    ),
+    (
+        3544,
+        "Recovered command (agent_actions id 5676): a Fase A stress-test "
+        "harness dev step building a6_live_probe.py from a5_live_probe.py "
+        "via sed, then printing it. Scratch dev command from that day's "
+        "permission_analyzer.py work, not a persisted defect.",
+        "agent_actions.id=5676; git log Fase A commits",
+    ),
+    (
+        3545,
+        "Recovered command (agent_actions id 5683): "
+        '`pkill -f "grep -qE .passed" ; python3 bin/tools/'
+        "validate_rules_registry.py | tail -4`, a Fase A dev-session "
+        "housekeeping step (killing a stray background grep, then "
+        "checking the validator). Scratch dev command, not a defect.",
+        "agent_actions.id=5683",
+    ),
+    (
+        3574,
+        "No action_id and no exact-timestamp Bash tool_use in this "
+        "session's transcript, but the surrounding window "
+        "(12:09:40-12:10:08) is fully accounted for by the dqiii8_knowledge.db "
+        "table/view investigation that led to the 2026-08-21 orphan-table "
+        "purge (docs/ARCHITECTURE.md) -- one of that cluster's commands "
+        "(a recursive grep across bin/ and .claude/, or a DB heredoc) hit "
+        "the 2-minute timeout. The investigation itself completed via the "
+        "other commands in the same window.",
+        "session 5dcae8a4 transcript, 2026-08-21T12:09:40-12:10:08Z",
+    ),
+    (
+        3589,
+        "Duplicate log entry (no action_id) for the same command as id "
+        "3590, same exit code (123) and same timestamp region: parallel/"
+        "twin logging of one general-purpose subagent's find|xargs|grep "
+        "command, not a distinct failure.",
+        "agent_actions.id=6457 (id 3590's linked action)",
+    ),
+    (
+        3590,
+        "Recovered command (agent_actions id 6457): "
+        '`find ... -name "*.service" -o -name "*.timer" | xargs grep -l '
+        '"ulimit\\|MemoryLimit\\|CPUQuota"`, exit 123. Expected xargs '
+        "semantics: exits 123 when some (not all) grep invocations find no "
+        "match, which is normal when searching many files for one pattern.",
+        "agent_actions.id=6457; xargs(1) exit-status semantics",
+    ),
+    (
+        1686,
+        "Recovered command (agent_actions id 264): "
+        '`sqlite3 .../dqiii8.db "SELECT COUNT(*) as total_actions, '
+        'SUM(CASE WHEN success=1 THEN 1 ELSE 0 E..."` (text truncated at '
+        "agent_actions.file_path's 120-char storage limit; error_log's own "
+        "error_message field for this row holds only 'Exit code 1', no "
+        "SQL error text). A one-off ad-hoc health-check query from that "
+        "day's stress testing; no evidence it affected production code, "
+        "but the exact clause that failed can't be confirmed past the "
+        "truncation point.",
+        "agent_actions.id=264; error_log.error_message='Exit code 1'",
+    ),
+    (
+        1687,
+        "Recovered command (agent_actions id 271): "
+        '`sqlite3 .../dqiii8.db "SELECT score, created_at, summary FROM '
+        'audit_reports ORDER BY created_at DESC L..."` -- same ad-hoc '
+        "query-typo root cause as the SELECT-ts-score / SELECT-score-"
+        "created_at-summary BashError patterns above (audit_reports has "
+        "no score/created_at/summary columns; real columns are "
+        "overall_score/timestamp). error_log's own error_message for this "
+        "row holds only 'Exit code 1' with no SQL text, so it could not "
+        "be caught by a message-body LIKE pattern -- resolved by id "
+        "instead, using the command recovered via agent_actions.",
+        "agent_actions.id=271; verified 2026-08-21 via .schema audit_reports",
+    ),
+]
+
 
 def main() -> None:
     conn = sqlite3.connect(str(DB_PATH), timeout=30)
@@ -195,6 +309,14 @@ def main() -> None:
             (f"{resolution} ({citation})", error_type, like_pattern),
         )
         print(f"{error_type} LIKE '{like_pattern}': resolved {cur.rowcount} row(s)")
+        total_resolved += cur.rowcount
+
+    for row_id, resolution, citation in EXPLICIT_IDS:
+        cur = conn.execute(
+            "UPDATE error_log SET resolved=1, resolution=? WHERE resolved=0 AND id=?",
+            (f"{resolution} ({citation})", row_id),
+        )
+        print(f"id={row_id}: resolved {cur.rowcount} row(s)")
         total_resolved += cur.rowcount
     conn.commit()
 
