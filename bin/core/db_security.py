@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Database security utilities for DQIII8."""
+
 import sqlite3
 import os
 import re
@@ -8,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import logging
+
 log = logging.getLogger(__name__)
 JARVIS = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
 DB_PATH = JARVIS / "database" / "dqiii8.db"
@@ -34,18 +36,15 @@ def secure_env_permissions():
 
 def verify_no_secrets_in_repo():
     """Scan tracked files for potential secrets."""
-    result = subprocess.run(
-        ["git", "ls-files"],
-        capture_output=True, text=True, cwd=str(JARVIS)
-    )
+    result = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=str(JARVIS))
     files = result.stdout.strip().split("\n")
 
     secret_patterns = [
-        r"ghp_[a-zA-Z0-9]{36}",           # GitHub PAT
-        r"sk-ant-[a-zA-Z0-9-]{40,}",      # Anthropic key
-        r"gsk_[a-zA-Z0-9]{20,}",          # Groq key
-        r"sk-[a-zA-Z0-9]{20,}",           # OpenAI key
-        r"xoxb-[a-zA-Z0-9-]+",            # Slack token
+        r"ghp_[a-zA-Z0-9]{36}",  # GitHub PAT
+        r"sk-ant-[a-zA-Z0-9-]{40,}",  # Anthropic key
+        r"gsk_[a-zA-Z0-9]{20,}",  # Groq key
+        r"sk-[a-zA-Z0-9]{20,}",  # OpenAI key
+        r"xoxb-[a-zA-Z0-9-]+",  # Slack token
     ]
 
     issues = []
@@ -61,7 +60,7 @@ def verify_no_secrets_in_repo():
                         f"ALERT: {f} contains potential secret matching {pattern[:20]}..."
                     )
         except Exception as _exc:
-            log.warning('%s: %s', __name__, _exc)
+            log.warning("%s: %s", __name__, _exc)
 
     if issues:
         print("  SECRETS FOUND IN TRACKED FILES:")

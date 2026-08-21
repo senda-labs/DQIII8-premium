@@ -15,6 +15,7 @@ navigate the real tab to a target page and sniff the XHR/fetch responses the
 page's own scripts make via the Network domain — those are indistinguishable
 from normal browsing because they are normal browsing.
 """
+
 from __future__ import annotations
 
 import base64
@@ -172,9 +173,7 @@ class CDPSession:
         self._send("Page.enable", {})
         self._id += 1
         nav_id = self._id
-        self.ws.send(json.dumps({
-            "id": nav_id, "method": "Page.navigate", "params": {"url": url}
-        }))
+        self.ws.send(json.dumps({"id": nav_id, "method": "Page.navigate", "params": {"url": url}}))
         prev_timeout = self.ws.gettimeout()
         self.ws.settimeout(1.0)
         try:
@@ -202,9 +201,15 @@ class CDPSession:
             content_size = metrics.get("result", {}).get("cssContentSize", {})
             width = min(int(content_size.get("width", 1920)), 1920)
             height = min(int(content_size.get("height", 1080)), 8000)
-            self._send("Emulation.setDeviceMetricsOverride", {
-                "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
-            })
+            self._send(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                },
+            )
             params["captureBeyondViewport"] = True
         result = self._send("Page.captureScreenshot", params)
         data = result.get("result", {}).get("data", "")
@@ -227,9 +232,7 @@ class CDPSession:
         self._send("Page.enable", {})
         self._id += 1
         nav_id = self._id
-        self.ws.send(json.dumps({
-            "id": nav_id, "method": "Page.navigate", "params": {"url": url}
-        }))
+        self.ws.send(json.dumps({"id": nav_id, "method": "Page.navigate", "params": {"url": url}}))
 
         pending_urls: dict[str, str] = {}  # requestId -> response url (post responseReceived)
         bodies: dict[str, Any] = {}
@@ -291,7 +294,9 @@ class CDPSession:
             pass
 
 
-def wait_for_tab(url_substring: str, port: int = 9333, retries: int = 10, delay: float = 1.0) -> dict:
+def wait_for_tab(
+    url_substring: str, port: int = 9333, retries: int = 10, delay: float = 1.0
+) -> dict:
     for _ in range(retries):
         tab = find_tab(url_substring, port)
         if tab:

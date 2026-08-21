@@ -37,6 +37,7 @@ def _state_file_for(session_id: str) -> Path:
     safe_id = _SAFE_ID_RE.sub("_", session_id)[:128] or "unknown"
     return JARVIS / "tasks" / f"precompact_state_{safe_id}.json"
 
+
 _log = logging.getLogger("dqiii8.postcompact")
 if not _log.handlers:
     _log.setLevel(logging.DEBUG)
@@ -86,7 +87,11 @@ try:
         sys.path.insert(0, _bin_root)
     from core.action_log import resolve_project_safe
 
-    project = pre_state.get("project") or resolve_project_safe(session_id, cwd=data.get("cwd")) or "dqiii8-core"
+    project = (
+        pre_state.get("project")
+        or resolve_project_safe(session_id, cwd=data.get("cwd"))
+        or "dqiii8-core"
+    )
 except Exception:
     project = pre_state.get("project") or "dqiii8-core"
 
@@ -142,9 +147,7 @@ compact_hint = ""
 try:
     n = int(actions_before)
     if n > 100:
-        compact_hint = (
-            f"\n[COMPACT] Sesión muy larga ({n} acciones) — /compact recomendado"
-        )
+        compact_hint = f"\n[COMPACT] Sesión muy larga ({n} acciones) — /compact recomendado"
     elif n > 50:
         compact_hint = f"\n[COMPACT] Sesión larga ({n} acciones) — considerar /compact"
 except (ValueError, TypeError):
@@ -169,7 +172,10 @@ Session actions: {actions_before}{compact_hint}{resume_block}
 
 _log.info(
     "injected session=%s audit=%s hint=%s chars=%d",
-    session_id, bool(audit_info), bool(compact_hint), len(ctx),
+    session_id,
+    bool(audit_info),
+    bool(compact_hint),
+    len(ctx),
 )
 print(json.dumps({"additionalContext": ctx}))
 sys.exit(0)

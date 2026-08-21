@@ -12,6 +12,7 @@ VPS has 0 GPU, so gTTS is the primary TTS engine here.
 Usage:
     from voice_handler import transcribe_audio, synthesize_speech
 """
+
 import os
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 import logging
+
 log = logging.getLogger(__name__)
 JARVIS = Path(os.environ.get("DQIII8_ROOT", "/root/dqiii8"))
 
@@ -51,9 +53,7 @@ def transcribe_audio(audio_path: str, language: str = None) -> str:
             )
 
         return (
-            transcription.strip()
-            if isinstance(transcription, str)
-            else transcription.text.strip()
+            transcription.strip() if isinstance(transcription, str) else transcription.text.strip()
         )
 
     except Exception as e:
@@ -79,11 +79,7 @@ def translate_audio_to_english(audio_path: str) -> str:
                 temperature=0.0,
             )
 
-        return (
-            translation.strip()
-            if isinstance(translation, str)
-            else translation.text.strip()
-        )
+        return translation.strip() if isinstance(translation, str) else translation.text.strip()
 
     except Exception as e:
         return f"[Translation error: {e}]"
@@ -110,14 +106,12 @@ def _detect_tts_engine() -> str:
 
     # Fallback: espeak (system, very low quality but always available)
     try:
-        result = subprocess.run(
-            ["espeak", "--version"], capture_output=True, timeout=3
-        )
+        result = subprocess.run(["espeak", "--version"], capture_output=True, timeout=3)
         if result.returncode == 0:
             _TTS_ENGINE = "espeak"
             return _TTS_ENGINE
     except Exception as _exc:
-        log.warning('%s: %s', __name__, _exc)
+        log.warning("%s: %s", __name__, _exc)
 
     _TTS_ENGINE = "none"
     return _TTS_ENGINE
@@ -238,9 +232,7 @@ if __name__ == "__main__":
         engine = _detect_tts_engine()
         print(f"Engine: {engine}")
         if engine != "none":
-            path = synthesize_speech(
-                "Hola, soy DQ, tu asistente de inteligencia artificial."
-            )
+            path = synthesize_speech("Hola, soy DQ, tu asistente de inteligencia artificial.")
             if path:
                 print(f"Test audio: {path}")
                 print(f"File size: {Path(path).stat().st_size} bytes")

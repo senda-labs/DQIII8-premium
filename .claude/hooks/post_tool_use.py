@@ -72,11 +72,7 @@ if not agent:
     except Exception as e:
         _log.debug("agent-file read skipped: %s", e)
 # Infer from tool+path if agent looks like a UUID (17 hex chars starting with 'a')
-if (
-    len(agent) == 17
-    and agent[0] == "a"
-    and all(c in "0123456789abcdef" for c in agent[1:])
-):
+if len(agent) == 17 and agent[0] == "a" and all(c in "0123456789abcdef" for c in agent[1:]):
     _fp = inp.get("file_path", inp.get("command", ""))
     if tool in ("Edit", "Write", "MultiEdit") and _fp.endswith(".py"):
         agent = "python-specialist"
@@ -124,11 +120,7 @@ try:
         else:
             success = (
                 0
-                if (
-                    resp.get("type") == "error"
-                    or resp.get("is_error")
-                    or resp.get("error")
-                )
+                if (resp.get("type") == "error" or resp.get("is_error") or resp.get("error"))
                 else 1
             )
         error_msg = (resp.get("stderr") or resp.get("error") or "")[:500]
@@ -149,9 +141,7 @@ try:
         content = inp.get("new_content", inp.get("content", ""))
         bytes_wr = len(content.encode("utf-8", errors="replace")) if content else 0
         # When failing without stderr: log tool + generic reason for audit
-        stored_error = error_msg or (
-            f"{tool} failed (no stderr)" if not success else None
-        )
+        stored_error = error_msg or (f"{tool} failed (no stderr)" if not success else None)
         _fp_match = inp.get("file_path", inp.get("command", ""))
 
         _action_id = None
@@ -251,9 +241,7 @@ try:
     _ok = (
         (_exit_c == 0)
         if _exit_c is not None
-        else not (
-            resp.get("type") == "error" or resp.get("is_error") or resp.get("error")
-        )
+        else not (resp.get("type") == "error" or resp.get("is_error") or resp.get("error"))
     )
     _err = (resp.get("stderr") or resp.get("error") or "")[:200]
     _pend: dict = {}
@@ -352,14 +340,18 @@ try:
             f"Tail (800 chars):\n{_tail}\n"
             f"\nPara analizar el contenido omitido:\n"
             f"  python3 bin/tools/summarize_output.py "
-            f"--query \"¿Qué [error/dato] buscas?\" < /tmp/last_output.txt\n"
+            f'--query "¿Qué [error/dato] buscas?" < /tmp/last_output.txt\n'
         )
-        print(json.dumps({
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": _summary_ctx,
-            }
-        }))
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": _summary_ctx,
+                    }
+                }
+            )
+        )
         sys.exit(0)
 except Exception as e:
     _log.debug("large-output detector skipped: %s", e)

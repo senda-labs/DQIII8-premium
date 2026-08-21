@@ -33,6 +33,7 @@ def _state_file_for(session_id: str) -> Path:
     safe_id = _SAFE_ID_RE.sub("_", session_id)[:128] or "unknown"
     return JARVIS / "tasks" / f"precompact_state_{safe_id}.json"
 
+
 _log = logging.getLogger("dqiii8.precompact")
 if not _log.handlers:
     _log.setLevel(logging.DEBUG)
@@ -110,7 +111,8 @@ try:
 
         # Increment compact_count in sessions (best-effort)
         conn.execute(
-            "UPDATE sessions SET compact_count = COALESCE(compact_count,0) + 1 " "WHERE session_id=?",
+            "UPDATE sessions SET compact_count = COALESCE(compact_count,0) + 1 "
+            "WHERE session_id=?",
             (SESSION_ID,),
         )
         conn.commit()

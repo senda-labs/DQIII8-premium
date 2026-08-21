@@ -175,20 +175,11 @@ def _load_env_dict() -> dict:
 
 def _infer_task_type(description: str) -> str:
     d = description.lower()
-    if any(
-        k in d
-        for k in ("video", "tts", "subtitle", "pipeline", "ffmpeg", "reels", "content")
-    ):
+    if any(k in d for k in ("video", "tts", "subtitle", "pipeline", "ffmpeg", "reels", "content")):
         return "pipeline"
-    if any(
-        k in d
-        for k in ("chapter", "scene", "novel", "narrative", "creative", "writing")
-    ):
+    if any(k in d for k in ("chapter", "scene", "novel", "narrative", "creative", "writing")):
         return "writing"
-    if any(
-        k in d
-        for k in ("review", "analiz", "research", "audit", "investiga", "explain")
-    ):
+    if any(k in d for k in ("review", "analiz", "research", "audit", "investiga", "explain")):
         return "analysis"
     if any(
         k in d
@@ -349,9 +340,7 @@ async def _run_task(task_id: str, description: str, chat_id: str) -> None:
     )
 
 
-async def handle_satisfaction_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def handle_satisfaction_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Registra la respuesta 👍/👎 y actualiza model_satisfaction."""
     query = update.callback_query
     await query.answer()
@@ -404,7 +393,9 @@ async def handle_resume_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if str(update.effective_chat.id) != str(row["allowed_chat_id"]):
-        log.warning("hpt: unauthorized chat %s tried to act on row %s", update.effective_chat.id, task_id)
+        log.warning(
+            "hpt: unauthorized chat %s tried to act on row %s", update.effective_chat.id, task_id
+        )
         await _safe_answer(query, "No autorizado.")
         return
 
@@ -414,10 +405,14 @@ async def handle_resume_callback(update: Update, context: ContextTypes.DEFAULT_T
         if row["status"] != "notified":
             await query.edit_message_text(f"(ya procesado: {row['status']})")
             return
-        confirm_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Confirmar reanudar", callback_data=f"hptok:{task_id}"),
-            InlineKeyboardButton("❌ Cancelar", callback_data=f"hptno:{task_id}"),
-        ]])
+        confirm_kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Confirmar reanudar", callback_data=f"hptok:{task_id}"),
+                    InlineKeyboardButton("❌ Cancelar", callback_data=f"hptno:{task_id}"),
+                ]
+            ]
+        )
         await query.edit_message_text(
             f"Reanudar {row['project']} / {row['action_id']}?\n"
             f"resume_args: {row['resume_args']}\n"
@@ -487,9 +482,7 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     description = " ".join(context.args).strip()
     if not description:
-        await update.message.reply_text(
-            "Usage: `/task [task description]`", parse_mode="Markdown"
-        )
+        await update.message.reply_text("Usage: `/task [task description]`", parse_mode="Markdown")
         return
     task_id = await _spawn_task(update, description)
     await update.message.reply_text(
@@ -523,15 +516,11 @@ async def cmd_output(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("Unauthorized.")
         return
     if not context.args:
-        await update.message.reply_text(
-            "Usage: `/output [task_id]`", parse_mode="Markdown"
-        )
+        await update.message.reply_text("Usage: `/output [task_id]`", parse_mode="Markdown")
         return
     task_id = context.args[0]
     if task_id not in ACTIVE_TASKS:
-        await update.message.reply_text(
-            f"Task `{task_id}` not found.", parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"Task `{task_id}` not found.", parse_mode="Markdown")
         return
     info = ACTIVE_TASKS[task_id]
     elapsed = int(time.time() - info["start_time"])
@@ -550,15 +539,11 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Unauthorized.")
         return
     if not context.args:
-        await update.message.reply_text(
-            "Usage: `/kill [task_id]`", parse_mode="Markdown"
-        )
+        await update.message.reply_text("Usage: `/kill [task_id]`", parse_mode="Markdown")
         return
     task_id = context.args[0]
     if task_id not in ACTIVE_TASKS:
-        await update.message.reply_text(
-            f"Task `{task_id}` not found.", parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"Task `{task_id}` not found.", parse_mode="Markdown")
         return
     proc = ACTIVE_TASKS[task_id].get("proc")
     if proc and proc.returncode is None:
@@ -622,9 +607,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     try:
         conn = sqlite3.connect(DB, timeout=30)
-        ranking = conn.execute(
-            "SELECT * FROM tier_ranking WHERE model_tier='tier3'"
-        ).fetchone()
+        ranking = conn.execute("SELECT * FROM tier_ranking WHERE model_tier='tier3'").fetchone()
         metrics = conn.execute(
             """
             SELECT renderer, lines_of_code, cpu_seconds,
@@ -890,9 +873,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     log.info("Reference image saved to %s", REFERENCE_IMAGE_PATH)
 
 
-async def _download_telegram_file(
-    context: ContextTypes.DEFAULT_TYPE, file_id: str
-) -> str:
+async def _download_telegram_file(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> str:
     """Download a Telegram file to tmp/ and return its local path."""
     tmp_dir = JARVIS / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -902,9 +883,7 @@ async def _download_telegram_file(
     return local_path
 
 
-async def _send_voice_reply(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
-) -> None:
+async def _send_voice_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     """Synthesize text and send as voice message. Cleans up temp file after sending."""
     audio_path = synthesize_speech(text[:500])
     if not audio_path or not Path(audio_path).exists():
@@ -995,9 +974,7 @@ async def cmd_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     arg = (context.args[0] if context.args else "").lower()
     if arg == "on":
         VOICE_RESPONSES_ENABLED = True
-        await update.message.reply_text(
-            "Voice responses enabled. I'll reply with audio."
-        )
+        await update.message.reply_text("Voice responses enabled. I'll reply with audio.")
     elif arg == "off":
         VOICE_RESPONSES_ENABLED = False
         await update.message.reply_text("Voice responses disabled. Text only.")
@@ -1058,9 +1035,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ── Block 4: Auto-improvement + Sleep Mode commands ──────────────────────────────
 
 
-async def cmd_research_status(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def cmd_research_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows research_items state by status."""
     if not authorized(update):
         await update.message.reply_text("Unauthorized.")
@@ -1130,9 +1105,7 @@ async def _handle_rechazar(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     item_id = int(m.group(1))
     conn = sqlite3.connect(str(DB), timeout=30)
-    conn.execute(
-        "UPDATE research_items SET status='RECHAZADO_MANUAL' WHERE id=?", (item_id,)
-    )
+    conn.execute("UPDATE research_items SET status='RECHAZADO_MANUAL' WHERE id=?", (item_id,))
     conn.commit()
     conn.close()
     await update.message.reply_text(f"[DQIII8] Item {item_id} rejected.")
@@ -1150,9 +1123,7 @@ async def _handle_aprobar(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     perm_id = m.group(1)
     perm_file = Path(f"/tmp/dqiii8_perm_{perm_id}.json")
-    perm_file.write_text(
-        '{"decision":"allow","reason":"user approved"}', encoding="utf-8"
-    )
+    perm_file.write_text('{"decision":"allow","reason":"user approved"}', encoding="utf-8")
     await update.message.reply_text(f"[DQIII8] Permission {perm_id} APPROVED.")
 
 
@@ -1172,9 +1143,7 @@ async def _handle_denegar(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(f"[DQIII8] Permission {perm_id} DENIED.")
 
 
-async def cmd_stop_autonomous(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def cmd_stop_autonomous(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Writes stop flag to halt the next autonomous session."""
     if not authorized(update):
         await update.message.reply_text("Unauthorized.")
@@ -1291,9 +1260,7 @@ def _cc_rate_ok(chat_id: str) -> bool:
     """Returns True if chat_id is within rate limit (persistent SQLite store)."""
     try:
         conn = sqlite3.connect(str(DB), timeout=30)
-        conn.execute(
-            "DELETE FROM cc_rate_limit WHERE timestamp < datetime('now', '-1 hour')"
-        )
+        conn.execute("DELETE FROM cc_rate_limit WHERE timestamp < datetime('now', '-1 hour')")
         count = conn.execute(
             "SELECT COUNT(*) FROM cc_rate_limit WHERE chat_id = ?", (str(chat_id),)
         ).fetchone()[0]
@@ -1499,9 +1466,7 @@ async def _run_cc_async(
         if progress_msg and (now - last_update) >= 15:
             phase = detect_phase(output_lines)
             try:
-                await progress_msg.edit_text(
-                    format_progress(project_label, phase, now - t0)
-                )
+                await progress_msg.edit_text(format_progress(project_label, phase, now - t0))
             except Exception:
                 pass
             last_update = now
@@ -1521,9 +1486,7 @@ async def _run_cc_async(
     candidates = parse_output(full_output, target)["files"]
     if extra_dirs:
         seen = {str(p) for p in candidates}
-        candidates += [
-            p for p in parse_output(full_output, JARVIS)["files"] if str(p) not in seen
-        ]
+        candidates += [p for p in parse_output(full_output, JARVIS)["files"] if str(p) not in seen]
 
     # parse_output joins emitted relative paths onto a root without normalising,
     # so "Created: ../../CLAUDE.md" escapes the project and cmd_cc would then
@@ -1614,9 +1577,7 @@ async def cmd_cc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (update.message.text or "").strip()
     prompt = text[len("/cc") :].strip()
     if not prompt:
-        await update.message.reply_text(
-            "Usage: /cc <prompt>\nExample: /cc explain bin/director.py"
-        )
+        await update.message.reply_text("Usage: /cc <prompt>\nExample: /cc explain bin/director.py")
         return
     prompt = _cc_sanitize(prompt)
     reason = _cc_check(prompt)
@@ -1655,9 +1616,7 @@ async def cmd_cc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     tier = classify_cc_tier(prompt)
 
     tier_labels = {"C": "Qwen", "A": "Sonnet", "S": "Opus"}
-    progress_msg = await update.message.reply_text(
-        f"[{label}] {tier_labels.get(tier, tier)}..."
-    )
+    progress_msg = await update.message.reply_text(f"[{label}] {tier_labels.get(tier, tier)}...")
 
     t0 = time.time()
     ctx = build_context(project, prompt) or ""
@@ -1771,9 +1730,7 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not success:
             break  # execution itself failed, no point testing
         try:
-            await progress_msg.edit_text(
-                f"[AUTO/{label}] Verifying (attempt {attempt})..."
-            )
+            await progress_msg.edit_text(f"[AUTO/{label}] Verifying (attempt {attempt})...")
         except Exception:
             pass
         verify_proc = await asyncio.create_subprocess_exec(
@@ -1832,6 +1789,7 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _hora_inicio(project: str, source: str = "telegram") -> str:
     """Open a human_hours session for `project`. Returns a user-facing message."""
     import datetime as _dt
+
     try:
         conn = sqlite3.connect(DB, timeout=30)
         try:
@@ -1853,12 +1811,12 @@ def _hora_inicio(project: str, source: str = "telegram") -> str:
 def _hora_fin(project: str) -> str:
     """Close the open human_hours session for `project`, if any."""
     import datetime as _dt
+
     try:
         conn = sqlite3.connect(DB, timeout=30)
         try:
             cur = conn.execute(
-                "UPDATE human_hours SET ended_at = ? "
-                "WHERE project = ? AND ended_at IS NULL",
+                "UPDATE human_hours SET ended_at = ? " "WHERE project = ? AND ended_at IS NULL",
                 (_dt.datetime.now(_dt.timezone.utc).isoformat(), project),
             )
             conn.commit()
@@ -1885,11 +1843,9 @@ async def cmd_hora(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # need to handle since this bot is only used in a 1:1 chat, but /hora's
     # exact command text is matched more literally below.
     text = re.sub(r"^/hora(@\S+)?", "/hora", text, count=1)
-    args = text[len("/hora"):].strip().split(maxsplit=1)
+    args = text[len("/hora") :].strip().split(maxsplit=1)
     if not args or args[0] not in ("inicio", "fin"):
-        await update.message.reply_text(
-            "Usage: /hora inicio [proyecto]\n/hora fin <proyecto>"
-        )
+        await update.message.reply_text("Usage: /hora inicio [proyecto]\n/hora fin <proyecto>")
         return
     action = args[0]
     project = args[1].strip() if len(args) > 1 else ""
@@ -1918,7 +1874,7 @@ async def cmd_proyecto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     text = (update.message.text or "").strip()
     text = re.sub(r"^/proyecto(@\S+)?", "/proyecto", text, count=1)
-    arg = text[len("/proyecto"):].strip()
+    arg = text[len("/proyecto") :].strip()
 
     if not arg:
         current = get_project("global")
@@ -2005,9 +1961,7 @@ async def cmd_tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         cost_str = f"${real_cost:.4f}" + (
             f" (+${listprice_cost:.4f} list-price)" if listprice_cost else ""
         )
-        lines.append(
-            f"`[{tier}] {short_model}` — {total:,} tok ({calls} calls) {cost_str}"
-        )
+        lines.append(f"`[{tier}] {short_model}` — {total:,} tok ({calls} calls) {cost_str}")
     if totals and totals[0][0]:
         t = totals[0]
         real_cost = (cost_split[0][0] or 0.0) if cost_split else 0.0
@@ -2056,9 +2010,7 @@ async def cmd_auth_status(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not authorized(update):
         return
     if not _CREDENTIALS_PATH.exists():
-        await update.message.reply_text(
-            "No credentials file at ~/.claude/.credentials.json"
-        )
+        await update.message.reply_text("No credentials file at ~/.claude/.credentials.json")
         return
     try:
         data = json.loads(_CREDENTIALS_PATH.read_text(encoding="utf-8"))
@@ -2105,9 +2057,7 @@ async def cmd_auth_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 # ── Global Telegram error handler ───────────────────────────────────────────────
-async def _telegram_error_handler(
-    update: object, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def _telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Catch all exceptions dispatched by python-telegram-bot.
 
     Transient network/conflict errors are logged at WARNING and discarded.
@@ -2192,12 +2142,8 @@ def main() -> None:
     # boot. It also sys.path.insert(0, ...)'d intl-reports/core ahead of the
     # stdlib. intl-reports is driven from tmux via core.cli, not Telegram.
     APP.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    APP.add_handler(
-        CallbackQueryHandler(handle_satisfaction_callback, pattern=r"^sat:")
-    )
-    APP.add_handler(
-        CallbackQueryHandler(handle_resume_callback, pattern=r"^hpt")
-    )
+    APP.add_handler(CallbackQueryHandler(handle_satisfaction_callback, pattern=r"^sat:"))
+    APP.add_handler(CallbackQueryHandler(handle_resume_callback, pattern=r"^hpt"))
 
     APP.add_error_handler(_telegram_error_handler)
     log.info("Bot polling. Ctrl+C to stop.")
@@ -2250,8 +2196,7 @@ def send_morning_report() -> None:
         # from agent_actions which is populated by pre_tool_use.py
         if sessions_yesterday == 0:
             sessions_yesterday = conn.execute(
-                "SELECT COUNT(DISTINCT session_id) FROM agent_actions"
-                " WHERE date(timestamp) = ?",
+                "SELECT COUNT(DISTINCT session_id) FROM agent_actions" " WHERE date(timestamp) = ?",
                 (yesterday,),
             ).fetchone()[0]
 
@@ -2290,9 +2235,7 @@ def send_morning_report() -> None:
             text = proj_file.read_text(encoding="utf-8")
             if "status: active" in text.lower() or "status:active" in text.lower():
                 active_project = proj_file.stem
-                m = re.search(
-                    r"(?:next[_\s]step|próximo)[:\s]+(.+)", text, re.IGNORECASE
-                )
+                m = re.search(r"(?:next[_\s]step|próximo)[:\s]+(.+)", text, re.IGNORECASE)
                 if m:
                     next_step = m.group(1).strip()[:80]
                 break

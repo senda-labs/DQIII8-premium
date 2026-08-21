@@ -33,7 +33,9 @@ if not log.handlers:
         _fh = logging.handlers.RotatingFileHandler(
             str(_log_dir / "hooks.log"), maxBytes=2_000_000, backupCount=3
         )
-        _fh.setFormatter(logging.Formatter("%(asctime)s [permission_request] %(levelname)s %(message)s"))
+        _fh.setFormatter(
+            logging.Formatter("%(asctime)s [permission_request] %(levelname)s %(message)s")
+        )
         log.addHandler(_fh)
     else:
         log.addHandler(logging.NullHandler())
@@ -84,9 +86,7 @@ def _has_critical_pattern(tool_input: dict) -> str | None:
 
 def _send_telegram(message: str) -> bool:
     """Send the escalation Telegram message. Returns True on success."""
-    token = os.environ.get("DQIII8_BOT_TOKEN", "") or os.environ.get(
-        "JARVIS_BOT_TOKEN", ""
-    )
+    token = os.environ.get("DQIII8_BOT_TOKEN", "") or os.environ.get("JARVIS_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         return False
@@ -187,9 +187,7 @@ def _escalation_telegram_flow(
     if response is not None:
         decision = response.get("decision", "deny")
         reason = response.get("reason", "user-response")
-        _log_decision(
-            session_id, tool_name, decision, f"escalation-human:{reason}", elapsed
-        )
+        _log_decision(session_id, tool_name, decision, f"escalation-human:{reason}", elapsed)
         if decision == "allow":
             _allow(reason)
         else:

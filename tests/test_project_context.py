@@ -1,4 +1,5 @@
 """tests/test_project_context.py — resolve_project()/set_project() precedence and contract."""
+
 import sqlite3
 import subprocess
 import sys
@@ -66,7 +67,10 @@ def test_cwd_fallback_requires_known_project(monkeypatch, tmp_path):
     _patch_db(monkeypatch, db_path)
     monkeypatch.setattr(pc, "MY_PROJECTS_DIR", tmp_path / "my-projects")
     (tmp_path / "my-projects" / "football-value").mkdir(parents=True)
-    assert pc.resolve_project(cwd="/root/dqiii8/my-projects/football-value/scripts") == "football-value"
+    assert (
+        pc.resolve_project(cwd="/root/dqiii8/my-projects/football-value/scripts")
+        == "football-value"
+    )
 
 
 def test_cwd_fallback_rejects_unknown_slug(monkeypatch, tmp_path):
@@ -74,7 +78,9 @@ def test_cwd_fallback_rejects_unknown_slug(monkeypatch, tmp_path):
     _patch_db(monkeypatch, db_path)
     monkeypatch.setattr(pc, "MY_PROJECTS_DIR", tmp_path / "my-projects")
     (tmp_path / "my-projects").mkdir(parents=True)
-    assert pc.resolve_project(cwd="/root/dqiii8/my-projects/typo-project/scripts") == pc.CORE_PROJECT
+    assert (
+        pc.resolve_project(cwd="/root/dqiii8/my-projects/typo-project/scripts") == pc.CORE_PROJECT
+    )
 
 
 def test_no_signal_defaults_to_core(monkeypatch, tmp_path):

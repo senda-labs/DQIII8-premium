@@ -75,7 +75,9 @@ def check_command(command: str) -> tuple[list[str], list[str]]:
             # P3-1): is_relative_to is purely lexical, so an unresolved
             # "/root/dqiii8/../dqiii8-premium/hook.py" token still tested
             # relative-to ROOT and slipped through as in-repo.
-            is_out_of_repo = os.path.isabs(tok) and not Path(tok).resolve().is_relative_to(ROOT.resolve())
+            is_out_of_repo = os.path.isabs(tok) and not Path(tok).resolve().is_relative_to(
+                ROOT.resolve()
+            )
             path = (Path(tok) if os.path.isabs(tok) else (ROOT / tok)).resolve()
             if not path.exists():
                 msg = f"referenced path not found: {path} (via {command!r})"
@@ -122,7 +124,11 @@ def _validate(settings_path: Path, source: str = "worktree") -> tuple[list[str],
     blob instead and could never detect an unstaged break."""
     problems, warnings = [], []
     try:
-        raw = _staged_or_worktree_text(settings_path) if source == "staged" else settings_path.read_text()
+        raw = (
+            _staged_or_worktree_text(settings_path)
+            if source == "staged"
+            else settings_path.read_text()
+        )
     except OSError as exc:
         return [f"cannot read {settings_path}: {exc}"], warnings
 

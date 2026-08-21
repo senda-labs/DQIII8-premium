@@ -38,13 +38,15 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     [ "$local_sha" = "$zero" ] && continue  # deleting a remote ref — nothing to scan
     if [ "$remote_sha" = "$zero" ]; then
         log_opts="$local_sha"  # new remote branch — scan every commit being pushed
+        base_ref=""
     else
         log_opts="${remote_sha}..${local_sha}"
+        base_ref="$remote_sha"
     fi
     echo "[pre-push] scanning ${log_opts} for secrets before push to ${remote_ref}..."
     gitleaks detect --source . --log-opts="${log_opts}" --redact --exit-code 1 --config .gitleaks.toml
     echo "[pre-push] scanning ${log_opts} for BLOCKED_PATHS before push to ${remote_ref}..."
-    python3 "${REPO_ROOT}/bin/tools/check_blocked_paths_diff.py" "${log_opts}"
+    python3 "${REPO_ROOT}/bin/tools/check_blocked_paths_diff.py" "${log_opts}" ${base_ref:+"$base_ref"}
 done
 EOF
 chmod +x "${HOOK_PATH}"

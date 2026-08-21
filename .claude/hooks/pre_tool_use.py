@@ -66,6 +66,7 @@ if not agent or (
         _lookup_path = _direct if os.path.exists(_direct) else None
         if _lookup_path is None:
             import sqlite3 as _rics
+
             _reg_db = os.path.join(DQIII8_ROOT, "database", "dqiii8.db")
             if os.path.exists(_reg_db):
                 _rconn = _rics.connect(_reg_db, timeout=2)
@@ -90,6 +91,7 @@ if not agent or (
 # ── PermissionAnalyzer ────────────────────────────────────────────────────────
 try:
     from permission_analyzer import PermissionAnalyzer, record_rejection
+
     result = PermissionAnalyzer().evaluate(tool, inp, session_id=session)
 except Exception as _e:
     # Fail CLOSED: a crash inside the security evaluator must DENY, never approve.
@@ -107,17 +109,21 @@ if result["decision"] in ("DENY", "ESCALATE"):
         record_rejection(tool, inp, result, session_id=session)
     except Exception as e:
         log.warning("pre_tool_use: record_rejection failed: %s", e, exc_info=True)
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                f"[PermissionAnalyzer:{result['decision']}] "
-                f"{result['reason']} | Risk: {result['risk_level']} | "
-                f"Fix: {str(result.get('suggested_fix', 'N/A'))[:120]}"
-            ),
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"[PermissionAnalyzer:{result['decision']}] "
+                        f"{result['reason']} | Risk: {result['risk_level']} | "
+                        f"Fix: {str(result.get('suggested_fix', 'N/A'))[:120]}"
+                    ),
+                }
+            }
+        )
+    )
     sys.exit(0)
 
 
@@ -152,6 +158,7 @@ def _tier_text(model_id: str) -> str:
 
 try:
     import sqlite3
+
     _DB = os.path.join(DQIII8_ROOT, "database", "dqiii8.db")
     _model = os.environ.get("DQIII8_MODEL", agent)
     _tier = _model_tier(_model)
@@ -173,13 +180,23 @@ try:
             "INSERT INTO agent_actions "
             "(session_id,agent_name,tool_used,file_path,action_type,start_time_ms,model_tier,model_used,project,worktree,tier,request_id) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (session, agent, tool,
-             # Stored untruncated — post_tool_use.py's close-out matches on the
-             # untruncated file_path; a truncated INSERT vs untruncated read
-             # would silently defeat that matching key.
-             inp.get("file_path", inp.get("command", "")),
-             tool.lower(), int(time.time() * 1000), _tier, _model, _project,
-             _worktree or None, _tier_text(_model), _request_id),
+            (
+                session,
+                agent,
+                tool,
+                # Stored untruncated — post_tool_use.py's close-out matches on the
+                # untruncated file_path; a truncated INSERT vs untruncated read
+                # would silently defeat that matching key.
+                inp.get("file_path", inp.get("command", "")),
+                tool.lower(),
+                int(time.time() * 1000),
+                _tier,
+                _model,
+                _project,
+                _worktree or None,
+                _tier_text(_model),
+                _request_id,
+            ),
         )
         _conn.commit()
         _conn.close()
@@ -203,9 +220,7 @@ except Exception as e:
 _OAUTH_FILES = ["/root/.claude.json", "/root/.claude/.credentials.json"]
 _OAUTH_READ_TOOLS = {"Read", "Grep", "Glob", "LS", "NotebookRead"}
 _OAUTH_PATH_KEYS = ("file_path", "path", "notebook_path", "pattern")
-_OAUTH_ALLOWED_RE = re.compile(
-    r'^\s*(?:ls(?:\s+-[a-zA-Z]+)*|stat|test\s+-[ef]|\[\s+-[ef])\s+\S'
-)
+_OAUTH_ALLOWED_RE = re.compile(r"^\s*(?:ls(?:\s+-[a-zA-Z]+)*|stat|test\s+-[ef]|\[\s+-[ef])\s+\S")
 _OAUTH_TOKEN_SPLIT_RE = re.compile(r"""[\s'"();|&<>=`,]+""")
 
 
@@ -224,16 +239,20 @@ def _oauth_path_hit(raw: str) -> bool:
 
 
 def _deny_oauth(detail: str) -> None:
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                f"Protected: OAuth credential file referenced ({detail}). Only "
-                "bare ls/stat/test metadata checks in Bash are permitted."
-            ),
-        }
-    }))
+    print(
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        f"Protected: OAuth credential file referenced ({detail}). Only "
+                        "bare ls/stat/test metadata checks in Bash are permitted."
+                    ),
+                }
+            }
+        )
+    )
     sys.exit(0)
 
 
@@ -241,12 +260,16 @@ if tool == "Bash":
     _cmd_check = inp.get("command", "") or ""
     try:
         from permission_analyzer import _collapse_adjacent_quotes
+
         _cmd_scan = _collapse_adjacent_quotes(_cmd_check)
     except Exception:
         _cmd_scan = _cmd_check
-    if any(_oauth_path_hit(t) for t in _OAUTH_TOKEN_SPLIT_RE.split(_cmd_scan)) or \
-            any(_f in _cmd_scan for _f in _OAUTH_FILES):
-        _has_chain = any(op in _cmd_check for op in ("|", ";", "&&", "||", ">", "<", "`", "$(", "\n", "\r"))
+    if any(_oauth_path_hit(t) for t in _OAUTH_TOKEN_SPLIT_RE.split(_cmd_scan)) or any(
+        _f in _cmd_scan for _f in _OAUTH_FILES
+    ):
+        _has_chain = any(
+            op in _cmd_check for op in ("|", ";", "&&", "||", ">", "<", "`", "$(", "\n", "\r")
+        )
         if _has_chain or not _OAUTH_ALLOWED_RE.match(_cmd_check):
             _deny_oauth("Bash")
 elif tool in _OAUTH_READ_TOOLS:
@@ -259,9 +282,12 @@ elif tool in _OAUTH_READ_TOOLS:
 _rules_context = ""
 try:
     from rules_dispatcher import get_rules
+
     _rules_context = get_rules(tool, inp)
 except Exception as e:
-    log.debug("pre_tool_use: rules RAG injection failed (best-effort): %s", e)  # never block on rules injection failure
+    log.debug(
+        "pre_tool_use: rules RAG injection failed (best-effort): %s", e
+    )  # never block on rules injection failure
 
 # ── Output Truncation: wrap large-output Bash commands ───────────────────────
 # Detects commands likely to produce >3000 chars and appends the truncation
@@ -278,14 +304,14 @@ try:
             r"\bgit\s+log\b(?!.*-\d)(?!.*\|\s*(?:head|tail|wc|grep|truncate))",
             r"\bcat\s+\S+\.(?:log|txt|csv|json)\b(?!\s*\|)",
             r"\bfind\s+/(?!tmp)(?!.*-maxdepth\s+[12])(?!.*\|\s*(?:head|wc))",
-            r"\bls\s+-[a-zA-Z]*R\b",     # ls -R (recursive)
-            r"\bps\s+aux\b(?!\s*\|)",    # full process list
+            r"\bls\s+-[a-zA-Z]*R\b",  # ls -R (recursive)
+            r"\bps\s+aux\b(?!\s*\|)",  # full process list
             r"\bpip\s+(?:list|freeze)\b(?!\s*\|)",
         ]
 
-        _already_piped = bool(re.search(
-            r"\|\s*(?:head|tail|wc|grep|less|more|truncate_output)", _raw_cmd
-        ))
+        _already_piped = bool(
+            re.search(r"\|\s*(?:head|tail|wc|grep|less|more|truncate_output)", _raw_cmd)
+        )
 
         if not _already_piped:
             for _pat in _LARGE_PATTERNS:

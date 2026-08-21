@@ -3,17 +3,18 @@ DQIII8 — Rules Dispatcher (RAG de Reglas Dinámico)
 Inyecta SÓLO las reglas relevantes al contexto del tool en curso.
 
 En lugar de cargar el corpus de reglas entero en cada turno, este módulo mapea
-tool + input → subconjunto mínimo de reglas (~1211–9055 tokens, cl100k_base real).
+tool + input → subconjunto mínimo de reglas (~1211–9203 tokens, cl100k_base real).
 El número de archivos del registro no se cita aquí: el recuento vivo es
 `len(_REGISTRY)` y su parte de rules_db/ está fijada en CLAUDE.md
 ("Contextual rules (N)"), validada por check_claude_md_counts().
 
 RANGO CANÓNICO (medido con token_estimate(), cl100k_base real vía tiktoken):
-**suelo 1211** (solo _ALWAYS = ops + core-behavior), **techo 9055**. Suelo de
+**suelo 1211** (solo _ALWAYS = ops + core-behavior), **techo 9203**. Suelo de
 sesión 2599 (suelo + CLAUDE.md, el único fichero que Claude Code auto-inyecta en
-toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md; techo
-re-medido el mismo día tras añadir la sección "SendMessage — sin secretos crudos"
-a common/agents.md (Rango 15, red-team audit).
+toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md. Techo
+re-medido 2026-08-20 tras editar 01_database_mutations.md y
+02_hooks_and_permissions.md; el margen sobre el valor anterior era cero, así que
+cualquier añadido a un fichero inyectado obliga a repetir esta medida.
 
 El techo es el MÁXIMO REALMENTE ALCANZABLE, no el peor caso de la matriz
 representativa: un Bash que combina todas las keywords de _BASH_KEYWORD_RULES
@@ -28,6 +29,15 @@ rango: este docstring (CLAUDE.md solo referencia el mecanismo, no los números).
 (invariante verificada por bin/tools/validate_rules_registry.py, que además
 mide el suelo y los techos reales en cada commit).
 
+DEDUP POR SESIÓN: los números de arriba son POR LLAMADA. pre_tool_use.py
+llama a get_rules() en cada tool call, así que sin dedup el coste acumulado
+de una sesión es techo x N. Desde 2026-08-20 cada alias se inyecta como
+máximo una vez por sesión (estado en var/rules_injected/<CLAUDE_SESSION_ID>,
+en disco porque cada hook es un subproceso nuevo). El dedup se DESACTIVA con
+DQIII8_RULES_DEDUP=0 (lo pone la fixture autouse de tests/conftest.py) o si
+CLAUDE_SESSION_ID no está definido (validate_rules_registry.py). Ambos siguen
+midiendo el suelo/techo real por llamada; el rango canónico no cambia.
+
 Las reglas contextuales residen en .claude/rules_db/ y en .claude/rules/*.md
 (salvo 00_core_behavior.md, en _ALWAYS), fuera del auto-inject de Claude Code:
 este dispatcher las carga bajo demanda, una por alias, disparada por tool/
@@ -39,6 +49,7 @@ estática, no reglas dinámicas).
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -54,74 +65,77 @@ RULES_DB = Path(__file__).resolve().parent.parent / "rules_db"
 # Paths are relative to RULES_DB; "../rules/" reaches the deterministic modules.
 _REGISTRY: dict[str, str] = {
     # ── Deterministic modules (new rule engine split) ─────────────────────────
-    "core-behavior":  "../rules/00_core_behavior.md",
-    "db-mutations":   "../rules/01_database_mutations.md",
-    "hooks-perms":    "../rules/02_hooks_and_permissions.md",
-    "tiering":        "../rules/03_tiering_and_routing.md",
+    "core-behavior": "../rules/00_core_behavior.md",
+    "db-mutations": "../rules/01_database_mutations.md",
+    "hooks-perms": "../rules/02_hooks_and_permissions.md",
+    "tiering": "../rules/03_tiering_and_routing.md",
     # ── Legacy contextual rules (rules_db/) ───────────────────────────────────
-    "git-safety":     "git-safety.md",
-    "python":         "python.md",
-    "ops":            "dqiii8-ops.md",
-    "prevention":     "dqiii8-error-prevention.md",
-    "tools":          "dqiii8-tools.md",
-    "plan-gate":      "dqiii8-plan-gate.md",
-    "workspace":      "workspace.md",
-    "intl-reports":   "intl-reports-ops.md",
-    "speckit":        "dqiii8-speckit.md",
-    "web-tools":      "web-research-tools.md",
-    "agents":         "common/agents.md",
-    "quality":        "common/quality.md",
+    "git-safety": "git-safety.md",
+    "python": "python.md",
+    "ops": "dqiii8-ops.md",
+    "prevention": "dqiii8-error-prevention.md",
+    "tools": "dqiii8-tools.md",
+    "plan-gate": "dqiii8-plan-gate.md",
+    "workspace": "workspace.md",
+    "intl-reports": "intl-reports-ops.md",
+    "speckit": "dqiii8-speckit.md",
+    "web-tools": "web-research-tools.md",
+    "agents": "common/agents.md",
+    "quality": "common/quality.md",
     # La taxonomía de tiers canónica es C/B/B+/B++/A/S y vive en
     # ../rules/03_tiering_and_routing.md (alias "tiering"). No redefinir tiers aquí.
 }
 
 # ── ALWAYS injected (ops guard + core behavior) ──────────────────────────────
 # Estos dos ficheros son el suelo de tokens declarado en el docstring.
-_ALWAYS: tuple[str, ...] = ("ops", "core-behavior")  # prohibitions + autonomy + zero-complacency/cost-first
+_ALWAYS: tuple[str, ...] = (
+    "ops",
+    "core-behavior",
+)  # prohibitions + autonomy + zero-complacency/cost-first
 
 # ── Tool → rules mapping ─────────────────────────────────────────────────────
 # Bash rules additionally filtered by command keyword below.
 _TOOL_RULES: dict[str, list[str]] = {
-    "Bash":       [],                        # resolved dynamically from command
-    "Edit":       [],                        # resolved dynamically from file_path
-    "Write":      [],                        # resolved dynamically from file_path
-    "Read":       ["prevention"],
-    "Glob":       [],
-    "Grep":       [],
-    "Agent":      ["tiering", "agents"],
-    "WebFetch":   ["web-tools"],
-    "WebSearch":  ["web-tools"],
-    "TodoWrite":  [],
-    "TodoRead":   [],
+    "Bash": [],  # resolved dynamically from command
+    "Edit": [],  # resolved dynamically from file_path
+    "Write": [],  # resolved dynamically from file_path
+    "Read": ["prevention"],
+    "Glob": [],
+    "Grep": [],
+    "Agent": ["tiering", "agents"],
+    "WebFetch": ["web-tools"],
+    "WebSearch": ["web-tools"],
+    "TodoWrite": [],
+    "TodoRead": [],
 }
 
 # ── Bash keyword → rules ─────────────────────────────────────────────────────
 _BASH_KEYWORD_RULES: list[tuple[re.Pattern, list[str]]] = [
-    (re.compile(r"\bgit\b"),                        ["git-safety", "prevention"]),
+    (re.compile(r"\bgit\b"), ["git-safety", "prevention"]),
     (re.compile(r"\bpython3?\b|\bpytest\b|\bpip\b"), ["python"]),
     # sqlite3 commands → inject full DB mutation rules
-    (re.compile(r"\bsqlite3\b"),                    ["db-mutations", "prevention"]),
+    (re.compile(r"\bsqlite3\b"), ["db-mutations", "prevention"]),
     # schema migration commands
-    (re.compile(r"apply_migrations|schema_v2"),     ["db-mutations"]),
-    (re.compile(r"\bsystemctl\b|\bservice\b"),       ["prevention"]),
-    (re.compile(r"(?<![./])\bclaude\b"),              ["tools"]),
+    (re.compile(r"apply_migrations|schema_v2"), ["db-mutations"]),
+    (re.compile(r"\bsystemctl\b|\bservice\b"), ["prevention"]),
+    (re.compile(r"(?<![./])\bclaude\b"), ["tools"]),
     (re.compile(r"bin/agents|bin/core/dispatch|\borchestrat"), ["tiering", "agents", "plan-gate"]),
     (re.compile(r"\btmux\b|\byazi\b|bin/workspace|launch_(swarm|beeswarm|monitor)"), ["workspace"]),
     (re.compile(r"generate_company|save_response|intl.writer|intl.reports"), ["intl-reports"]),
-    (re.compile(r"\bfirecrawl\b"),                   ["web-tools"]),
-    (re.compile(r"speckit|spec-kit|specify\b"),      ["speckit"]),
+    (re.compile(r"\bfirecrawl\b"), ["web-tools"]),
+    (re.compile(r"speckit|spec-kit|specify\b"), ["speckit"]),
 ]
 
 # ── File extension → rules ───────────────────────────────────────────────────
 _EXT_RULES: dict[str, list[str]] = {
-    ".py":   ["python", "quality"],
-    ".md":   [],
+    ".py": ["python", "quality"],
+    ".md": [],
     ".json": [],
-    ".sql":  ["db-mutations", "prevention"],  # SQL edits always get DB mutation rules
-    ".sh":   ["git-safety"],
+    ".sql": ["db-mutations", "prevention"],  # SQL edits always get DB mutation rules
+    ".sh": ["git-safety"],
     ".toml": [],
     ".yaml": [],
-    ".yml":  [],
+    ".yml": [],
 }
 
 
@@ -146,6 +160,50 @@ def _read(alias: str) -> str:
             file=sys.stderr,
         )
         return ""
+
+
+# ── Per-session injection state ──────────────────────────────────────────────
+# On disk, not in memory: every hook invocation is a fresh subprocess, so
+# nothing one call sets is visible to the next.
+_STATE_DIR = Path(__file__).resolve().parent.parent.parent / "var" / "rules_injected"
+
+
+def _state_file() -> Path | None:
+    """This session's state file, or None when dedup must not apply."""
+    if os.environ.get("DQIII8_RULES_DEDUP", "") == "0":
+        return None  # explicit opt-out (tests): measure true per-call cost
+    sid = os.environ.get("CLAUDE_SESSION_ID", "").strip()
+    if not sid:
+        return None  # no session identity to key state on
+    return _STATE_DIR / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', sid)}.txt"
+
+
+def _injected_this_session() -> set[str]:
+    """Aliases already injected. Fails open to empty (= inject everything)."""
+    f = _state_file()
+    if f is None:
+        return set()
+    try:
+        return set(f.read_text(encoding="utf-8").split())
+    except OSError:
+        return set()
+
+
+def _record_injected(aliases: Sequence[str]) -> None:
+    """Append aliases to this session's state. Best-effort by contract."""
+    f = _state_file()
+    if f is None or not aliases:
+        return
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write("".join(f"{a}\n" for a in aliases))
+    except OSError as exc:
+        print(
+            f"[rules_dispatcher] WARN: cannot record injected rules "
+            f"({f}): {exc.__class__.__name__}",
+            file=sys.stderr,
+        )
 
 
 def get_rules(tool: str, tool_input: dict) -> str:
@@ -196,19 +254,27 @@ def get_rules(tool: str, tool_input: dict) -> str:
             seen.add(a)
             unique.append(a)
 
+    already = _injected_this_session()
+    unique = [a for a in unique if a not in already]
+
     if not unique:
         return ""
 
     # ── Build injection block ─────────────────────────────────────────────────
     parts: list[str] = ["[DQIII8 Rules — context-specific]"]
+    emitted: list[str] = []
     for alias in unique:
         content = _read(alias)
         if content:
             parts.append(content)
+            # only mark what actually carried content, so an unreadable
+            # rule file is retried on the next call instead of lost
+            emitted.append(alias)
 
     if len(parts) == 1:
         return ""
 
+    _record_injected(emitted)
     return "\n\n".join(parts)
 
 

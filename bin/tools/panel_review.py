@@ -277,7 +277,11 @@ def render_report(result: dict) -> str:
         lines.append("")
 
     opus_seat = seats[0] if seats else None
-    if opus_seat is not None and opus_seat.get("healthy") and not opus_seat.get("verified_findings"):
+    if (
+        opus_seat is not None
+        and opus_seat.get("healthy")
+        and not opus_seat.get("verified_findings")
+    ):
         lines.append(
             "**Opus pass returned zero verified findings** — treat as a clean "
             "bill only because the pass had real repo access and did not "

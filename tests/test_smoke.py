@@ -83,9 +83,7 @@ def test_intent_amplifier():
     assert isinstance(result, dict), "amplify() debe devolver dict"
     for key in ("tier", "intent", "amplified"):
         assert key in result, f"key {key!r} ausente en {list(result.keys())}"
-    assert isinstance(
-        result["tier"], int
-    ), f"tier debe ser int, got {type(result['tier'])}"
+    assert isinstance(result["tier"], int), f"tier debe ser int, got {type(result['tier'])}"
     assert result["tier"] in (1, 2, 3), f"tier debe ser 1-3, got {result['tier']}"
 
 
@@ -99,9 +97,7 @@ def test_embeddings():
 
 def test_db_connection():
     """La DB principal es accesible."""
-    row = query(
-        "SELECT COUNT(*) as n FROM sqlite_master WHERE type='table'", fetchone=True
-    )
+    row = query("SELECT COUNT(*) as n FROM sqlite_master WHERE type='table'", fetchone=True)
     count = row["n"]
     assert count > 0, f"DB no accesible (tables={count})"
 
@@ -156,9 +152,7 @@ def test_knowledge_enricher_get_chunks():
     assert isinstance(chunks, list), f"expected list, got {type(chunks)}"
     if chunks:
         assert all(isinstance(c, dict) for c in chunks), "each item must be dict"
-        assert all(
-            "text" in c and "score" in c for c in chunks
-        ), "each dict must have text+score"
+        assert all("text" in c and "score" in c for c in chunks), "each dict must have text+score"
     assert original == "photosynthesis process", "prompt must not be mutated"
 
 
@@ -179,12 +173,8 @@ def test_amplifier_chunks_used_post_filter():
     """
     from knowledge_enricher import get_relevant_chunks
 
-    chunks = get_relevant_chunks(
-        "prove convergence of Newton-Raphson", "formal_sciences", top_k=5
-    )
-    result = amplify(
-        "prove convergence of Newton-Raphson", domain="formal_sciences", chunks=chunks
-    )
+    chunks = get_relevant_chunks("prove convergence of Newton-Raphson", "formal_sciences", top_k=5)
+    result = amplify("prove convergence of Newton-Raphson", domain="formal_sciences", chunks=chunks)
     assert result["tier"] == 1, f"expected Tier C (1), got {result['tier']}"
     assert (
         result["chunks_used"] <= 1
@@ -229,9 +219,7 @@ def test_amplifier_tier_b_no_reference_when_no_specific_chunks():
             amp == "analyze the use of light in Vermeer paintings"
         ), "With 0 specific chunks, Tier B must return original prompt unmodified"
     else:
-        assert (
-            "<reference>" in amp
-        ), "With specific chunks, Tier B must use <reference> tag"
+        assert "<reference>" in amp, "With specific chunks, Tier B must use <reference> tag"
 
 
 def test_task_relevance_reranking():
@@ -254,20 +242,14 @@ def test_task_relevance_reranking():
         prompt, "humanities_arts", top_k=5, intent="analyze", entity="light Vermeer"
     )
 
-    assert isinstance(
-        chunks_reranked, list
-    ), f"expected list, got {type(chunks_reranked)}"
+    assert isinstance(chunks_reranked, list), f"expected list, got {type(chunks_reranked)}"
     if len(chunks_reranked) < 2:
         return  # not enough data to test ordering
 
-    assert all(
-        "task_relevance" in c for c in chunks_reranked
-    ), "task_relevance key missing"
+    assert all("task_relevance" in c for c in chunks_reranked), "task_relevance key missing"
 
     # Reranked list must be descending by task_relevance
-    assert (
-        chunks_reranked[0]["task_relevance"] >= chunks_reranked[-1]["task_relevance"]
-    ), (
+    assert chunks_reranked[0]["task_relevance"] >= chunks_reranked[-1]["task_relevance"], (
         f"task_relevance not descending: first={chunks_reranked[0]['task_relevance']} "
         f"last={chunks_reranked[-1]['task_relevance']}"
     )
@@ -295,9 +277,7 @@ def test_vermeer_rerank_prefers_technique_over_prices():
     if len(chunks) >= 2:
         for c in chunks:
             print(f'relevance={c.get("task_relevance", 0):.3f} {c["text"][:80]}')
-        assert chunks[0].get("task_relevance", 0) > chunks[-1].get(
-            "task_relevance", 0
-        ), (
+        assert chunks[0].get("task_relevance", 0) > chunks[-1].get("task_relevance", 0), (
             f"First chunk should have higher task_relevance than last: "
             f"first={chunks[0].get('task_relevance', 0):.3f} "
             f"last={chunks[-1].get('task_relevance', 0):.3f}"
@@ -318,10 +298,7 @@ def test_confidence_gate_skips_generic():
             "score": 0.22,
         },
     ]
-    assert (
-        should_enrich("explain photosynthesis", "natural_sciences", generic_chunks, 2)
-        is False
-    )
+    assert should_enrich("explain photosynthesis", "natural_sciences", generic_chunks, 2) is False
 
 
 def test_confidence_gate_enriches_specific():
@@ -334,19 +311,14 @@ def test_confidence_gate_enriches_specific():
             "score": 0.35,
         },
     ]
-    assert (
-        should_enrich("calculate WACC for Tesla", "social_sciences", specific_chunks, 2)
-        is True
-    )
+    assert should_enrich("calculate WACC for Tesla", "social_sciences", specific_chunks, 2) is True
 
 
 def test_confidence_gate_always_enriches_tier_c():
     """Tier C always gets enrichment regardless of chunk quality."""
     from confidence_gate import should_enrich
 
-    assert (
-        should_enrich("anything", "any", [{"text": "generic", "score": 0.1}], 1) is True
-    )
+    assert should_enrich("anything", "any", [{"text": "generic", "score": 0.1}], 1) is True
 
 
 def test_confidence_gate_skips_empty():
@@ -372,9 +344,7 @@ def test_intent_suffix_compare():
     from knowledge_enricher import get_relevant_chunks
 
     chunks = get_relevant_chunks("compare React vs Vue", "applied_sciences")
-    r = amplify(
-        "compare React vs Vue for a startup", domain="applied_sciences", chunks=chunks
-    )
+    r = amplify("compare React vs Vue for a startup", domain="applied_sciences", chunks=chunks)
     assert (
         "compar" in r["amplified"].lower()
     ), f"compare intent must include 'compar' in amplified prompt. Got: {r['amplified']}"
@@ -449,9 +419,7 @@ def test_confidence_gate_tier_a_skips_low_similarity():
         },
     ]
     assert (
-        should_enrich(
-            "how do mRNA vaccines work", "natural_sciences", specific_but_low_sim, 3
-        )
+        should_enrich("how do mRNA vaccines work", "natural_sciences", specific_but_low_sim, 3)
         is False
     ), "Tier A must require score >= 0.55 — low similarity injects noise into frontier models"
 
@@ -488,9 +456,7 @@ def test_confidence_gate_tier_a_skips_generic_even_if_high_score():
         },
     ]
     assert (
-        should_enrich(
-            "explain the Kelly Criterion", "formal_sciences", high_score_generic, 3
-        )
+        should_enrich("explain the Kelly Criterion", "formal_sciences", high_score_generic, 3)
         is False
     ), "Tier A must require specific/numerical data — generic definitions must be rejected even with high similarity"
 
@@ -507,10 +473,7 @@ def test_confidence_gate_tier_b_floor_raised():
     ]
     # score=0.22 < 0.30 floor → False, even though has_specific_data=True
     assert (
-        should_enrich(
-            "explain fiscal multiplier", "social_sciences", borderline_chunks, 2
-        )
-        is False
+        should_enrich("explain fiscal multiplier", "social_sciences", borderline_chunks, 2) is False
     ), "Tier B floor raised to 0.30 — score=0.22 must be rejected"
 
 
@@ -587,9 +550,7 @@ def test_subdomain_classification_algorithms():
     """Big-O and complexity queries map to 'algorithms' subdomain."""
     from subdomain_classifier import classify_subdomain
 
-    sd = classify_subdomain(
-        "what is the time complexity of merge sort", "formal_sciences"
-    )
+    sd = classify_subdomain("what is the time complexity of merge sort", "formal_sciences")
     assert sd == "algorithms", f"Big-O must map to algorithms, got {sd!r}"
 
 
@@ -597,9 +558,7 @@ def test_subdomain_classification_ai_ml():
     """RAG/LLM queries map to 'ai_ml' subdomain."""
     from subdomain_classifier import classify_subdomain
 
-    sd = classify_subdomain(
-        "explain RAG architecture and retrieval", "applied_sciences"
-    )
+    sd = classify_subdomain("explain RAG architecture and retrieval", "applied_sciences")
     assert sd == "ai_ml", f"RAG must map to ai_ml, got {sd!r}"
 
 
@@ -608,9 +567,7 @@ def test_subdomain_classification_fallback():
     from subdomain_classifier import classify_subdomain
 
     sd = classify_subdomain("something completely unrelated xyz", "formal_sciences")
-    assert (
-        sd == "formal_sciences"
-    ), f"Unknown query must fall back to domain, got {sd!r}"
+    assert sd == "formal_sciences", f"Unknown query must fall back to domain, got {sd!r}"
 
 
 def test_subdomain_classification_philosophy():
