@@ -10,8 +10,9 @@ El número de archivos del registro no se cita aquí: el recuento vivo es
 
 RANGO CANÓNICO (medido con token_estimate(), cl100k_base real vía tiktoken):
 **suelo 1211** (solo _ALWAYS = ops + core-behavior), **techo 9203**. Suelo de
-sesión 2599 (suelo + CLAUDE.md, el único fichero que Claude Code auto-inyecta en
-toda sesión) — medido 2026-08-19 tras la eliminación de DYNAMIC.md. Techo
+sesión 2591 (suelo + CLAUDE.md, el único fichero que Claude Code auto-inyecta en
+toda sesión) — re-medido 2026-08-21 tras trim del parentético stale de schema.sql
+en CLAUDE.md (era 2599 el 2026-08-19, tras la eliminación de DYNAMIC.md). Techo
 re-medido 2026-08-20 tras editar 01_database_mutations.md y
 02_hooks_and_permissions.md; el margen sobre el valor anterior era cero, así que
 cualquier añadido a un fichero inyectado obliga a repetir esta medida.

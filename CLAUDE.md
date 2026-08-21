@@ -41,7 +41,7 @@ repite, solo añade lo que ese no cubre.
   siquiera edición manual directa. SSOT `.claude/rules/02_hooks_and_permissions.md` § Blocked paths.
 - NUNCA hardcodees API keys — siempre `os.environ.get("VAR")`.
 - NUNCA commitees `*.db` — gitignored por diseño. `database/schema_v2.sql` para instalaciones
-  nuevas (`database/schema.sql` ya no existe).
+  nuevas.
 - `ANTHROPIC_API_KEY` = `""` en el env de todo subprocess al usar Claude Code OAuth — convención
   de operador, sin enforcement en código; si "Credit balance too low", verifica esto a mano
   primero.
