@@ -743,6 +743,67 @@ def _mask_inert_python(cmd: str) -> str:
 _PATH_TOKEN_WORD_RE = re.compile(r"[A-Za-z0-9_]")
 
 
+# 2026-08-21 (A7). Ver _js_payload_verdict.
+_JS_CMD_RE = re.compile(r"(?:^|[\s;&|])(?:/[\w./-]*/)?node(?:\s|$)")
+# El delimitador se trata por separado a proposito. Con `(['\"])(.*?)\1` el
+# payload `"console.log(\"x\")"` se cortaba en la primera comilla ESCAPADA, y
+# medio `console.log(` no casa la allowlist: un `console.log` legitimo salia
+# escalado. Dentro de comilla simple el shell no interpreta escapes; dentro de
+# doble, si.
+_JS_EVAL_RE = re.compile(
+    r"(?:^|[\s;&|])(?:/[\w./-]*/)?node\s+(?:-\w+\s+)*"
+    r"(?:-e|--eval|-p|--print)\s+(?:'([^']*)'|\"((?:[^\"\\]|\\.)*)\")",
+    re.S,
+)
+# Mismo criterio que en A6: sin terminador no hay span, y sin span no se afirma
+# nada.
+_JS_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1\r?\n(.*?)\r?\n\2(?:\s|$)", re.S)
+
+# ALLOWLIST anclada al payload ENTERO: uno o mas `console.log` de literales de
+# cadena, nada mas. No admite escapes dentro del literal — un `\` podria ocultar
+# la comilla de cierre y cambiar como parsea node lo que viene detras.
+_JS_INERT_RE = re.compile(
+    r"^\s*(?:console\.log\(\s*(?:'[^'\\]*'|\"[^\"\\]*\")"
+    r"(?:\s*,\s*(?:'[^'\\]*'|\"[^\"\\]*\"))*\s*\)\s*;?\s*)+$"
+)
+
+
+def _js_payloads(cmd: str) -> list[tuple[int, int]]:
+    """Tramos de CMD que son JavaScript entregado a node."""
+    spans = []
+    for m in _JS_EVAL_RE.finditer(cmd):
+        spans.append(m.span(1) if m.group(1) is not None else m.span(2))
+    if _JS_CMD_RE.search(cmd):
+        spans.extend(m.span(3) for m in _JS_HEREDOC_RE.finditer(cmd))
+    return spans
+
+
+def _js_payload_verdict(cmd: str, spans: list[tuple[int, int]]) -> str:
+    """'inert' | 'active' para el JS de SPANS.
+
+    No hay tercer valor: sin parser, "no se pudo analizar" y "no case la
+    allowlist" son la misma cosa, y ambas son activo. En A6 el 'unknown' existe
+    porque `ast.parse` distingue de verdad esos dos casos.
+
+    Solo se deshace `\"`, que es lo que el shell ya resolvio antes de que node
+    vea el texto. Cualquier otra barra sobrevive, y la allowlist no admite
+    barras dentro de los literales, asi que lo raro cae del lado activo.
+    """
+    for start, end in spans:
+        if not _JS_INERT_RE.match(cmd[start:end].replace('\\"', '"')):
+            return "active"
+    return "inert"
+
+
+def _interpreter_code_is_active(cmd: str) -> bool:
+    """¿Entrega CMD a un interprete codigo que no es demostrablemente inerte?"""
+    py = _python_payloads(cmd)
+    if py and _python_payload_verdict(cmd, py) == "active":
+        return True
+    js = _js_payloads(cmd)
+    return bool(js) and _js_payload_verdict(cmd, js) == "active"
+
+
 def _mentions_protected_path(cmd: str) -> bool:
     """¿Nombra el comando algun blocked/governance path, como PATH y no como fragmento?
 
@@ -1566,6 +1627,9 @@ _NETWORK_EGRESS_BASH_RE = re.compile(
     r"|urllib\.request|requests\.(?:post|get|put|patch)\b|httpx\."
     r"|socket\.(?:socket|connect|create_connection)"
     r"|http\.client|aiohttp|/dev/(?:tcp|udp)/"
+    # A7: node abria sockets sin entrar aqui. `fetch\(` exige parentesis,
+    # asi que `git fetch origin` no casa.
+    r"|fetch\(|require\(['\"](?:node:)?(?:http|https|net|dgram|tls)['\"]\)"
 )
 _SENSITIVE_ENV_VAR_RE = re.compile(
     r"\$\{?[A-Z][A-Z0-9_]*(?:_KEY|_TOKEN|_SECRET|_PASSWORD|_PASSWD)\}?\b"
@@ -2876,16 +2940,11 @@ class PermissionAnalyzer:
         # A6: el AST dice que el payload es codigo ACTIVO y el comando nombra
         # un path protegido. Esto se aprobaba: la heuristica de texto no ve
         # `getattr(__builtins__, 'op' + 'en')`.
-        _py_spans = _python_payloads(cmd)
-        if (
-            _py_spans
-            and _python_payload_verdict(cmd, _py_spans) == "active"
-            and _mentions_protected_path(cmd)
-        ):
+        if _interpreter_code_is_active(cmd) and _mentions_protected_path(cmd):
             return self._escalate(
                 tool,
                 cmd[:80],
-                "Python handed to an interpreter is not statically inert and "
+                "Code handed to an interpreter is not statically inert and "
                 "the command names a protected path — its runtime effect "
                 "cannot be checked, human review required.",
                 "bash_interpreter_code_touches_protected_path",

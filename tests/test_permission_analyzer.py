@@ -4137,12 +4137,11 @@ def test_a6_adds_no_friction_away_from_protected_paths(cmd):
     assert r["decision"] == "APPROVE", r
 
 
-def test_a6_scope_is_python_only_and_declared():
-    """Perl/node/sh keep the text heuristic — recorded, not silently assumed safe.
+def test_python_and_js_extractors_stay_in_their_lane():
+    """Neither extractor may claim a span in a language it cannot judge.
 
-    The claim under test is narrow on purpose: `_python_payloads` must not claim
-    a span it cannot parse as Python. A future widening to other interpreters
-    has to make this test say something different, not just leave it passing.
+    A6 shipped with this pinned for Python alone. A7 widened the machinery to
+    node, so the claim widened with it instead of being left quietly passing.
     """
     for cmd in (
         f"perl -e \"print '{MD}'\"",
@@ -4150,6 +4149,13 @@ def test_a6_scope_is_python_only_and_declared():
         f"sh -c \"echo '{MD}'\"",
     ):
         assert not _pa._python_payloads(cmd), cmd
+    for cmd in (
+        f"perl -e \"print '{MD}'\"",
+        f"python3 -c \"print('{MD}')\"",
+        f"sh -c \"echo '{MD}'\"",
+        "git fetch origin",
+    ):
+        assert not _pa._js_payloads(cmd), cmd
 
 
 def test_a6_never_downgrades_an_existing_verdict():
@@ -4172,3 +4178,107 @@ def test_a6_never_downgrades_an_existing_verdict():
     # ...and the fragment that is not a path stays a fragment.
     r = analyzer.evaluate("Bash", {"command": f"python3 -c \"import os; print({env}['HOME'])\""})
     assert r["decision"] == "APPROVE", r
+
+
+# --- A7 (2026-08-21): node joins the structural judgement ---------------------
+# Measured against the deployed hook before any code was written, because the
+# premise was wrong: sh -c and perl already denied every write shape probed
+# (direct, variable-indirect, concatenated, tee, printf, File::Copy without a
+# `>`), while node approved all four probes — writeFileSync, appendFileSync,
+# child_process and a fetch to a sink host. node was the hole; the other two are
+# pinned below so they cannot regress quietly.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        f"node -e \"require('fs').writeFileSync('{MD}','x')\"",
+        f"node -e \"require('fs').appendFileSync('{MD}','x')\"",
+        f"node -e \"require('fs').unlinkSync('{SETJ}')\"",
+        f"node -e \"require('f'+'s')['write'+'FileSync']('{MD}','x')\"",
+        f"node --eval \"require('fs').writeFileSync('{MD}','x')\"",
+        f"node -p \"require('fs').writeFileSync('{MD}','x')\"",
+        f"node - <<'JS'\nrequire('fs').writeFileSync('{MD}','x')\nJS",
+        f"node -e \"require('child_process').execSync('rm {SETJ}')\"",
+        # The cover story: a real console.log first, the write after. This is why
+        # the allowlist is anchored at BOTH ends — without the trailing `$` a
+        # payload only has to START inertly.
+        f"node -e \"console.log('{MD}'); require('fs').writeFileSync('{MD}','x')\"",
+        f"node -e \"eval(Buffer.from('eA==','base64').toString()); console.log('{MD}')\"",
+    ],
+)
+def test_active_js_touching_a_protected_path_never_approves(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] in ("DENY", "ESCALATE"), r
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        f"node -e \"console.log('{MD}')\"",
+        f"node -e \"console.log('{MD}', 'ok')\"",
+        f"node -e \"console.log('{MD}'); console.log('{SETJ}')\"",
+        # Shell-escaped inner quotes. The first extractor cut the payload at the
+        # first ESCAPED quote, so half a console.log failed the allowlist and a
+        # plain log came out escalated — the same lost-role bug as A3a/A4/A5/A6,
+        # this time in my own extractor.
+        f'node -e "console.log(\\"{MD}\\")"',
+    ],
+)
+def test_inert_js_naming_a_protected_path_is_data(cmd):
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] == "APPROVE", r
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        f'sh -c "echo x > {MD}"',
+        f"sh -c 'p={MD}; echo x > $p'",
+        f'sh -c "echo x | tee {MD}"',
+        f'sh -c "printf x > {SETJ}"',
+        f"perl -e \"open(F,'>','{MD}')\"",
+        f"perl -e \"unlink '{SETJ}'\"",
+        "perl -MFile::Copy -e \"copy('/tmp/x','/root/dqiii8/'.'CLAUDE.md')\"",
+    ],
+)
+def test_perl_and_sh_writes_stay_blocked(cmd):
+    """Already covered before A7 by the text heuristic — pinned, not re-solved.
+
+    Adding interpreter machinery for perl and sh would have bought nothing here
+    and cost friction on every legitimate read. What it would cost if this ever
+    silently regressed is exactly what these cases assert.
+    """
+    r = analyzer.evaluate("Bash", {"command": cmd})
+    assert r["decision"] in ("DENY", "ESCALATE"), r
+
+
+def test_node_egress_reaches_the_host_checks():
+    """node opened sockets without entering the Bash egress gate at all.
+
+    The gate only marks a command for further inspection, so this asserts the
+    outcome (sink host denied, ordinary host still approved), not the match.
+    """
+    for cmd in (
+        "node -e \"fetch('https://webhook.site/x')\"",
+        "node -e \"require('https').get('https://webhook.site/x')\"",
+    ):
+        assert analyzer.evaluate("Bash", {"command": cmd})["decision"] == "DENY", cmd
+    for cmd in (
+        "node -e \"fetch('https://api.github.com/repos/x')\"",
+        "git fetch origin",
+    ):
+        assert analyzer.evaluate("Bash", {"command": cmd})["decision"] == "APPROVE", cmd
+
+
+def test_a7_ceiling_is_the_obfuscated_path_not_the_interpreter():
+    """Declared, measured, deliberately open — so nobody reads A7 as more.
+
+    When the protected path is built by command substitution it never appears
+    literally, so neither the text heuristic nor `_mentions_protected_path` sees
+    it. Narrowing redirect destinations is the Phase B redesign (an allowlist of
+    simple shapes), still owed. This test states the gap out loud; closing it
+    must make this test change, not merely keep passing.
+    """
+    cmd = "sh -c 'echo x > /root/dqiii8/$(echo Q0xBVURFLm1k | base64 -d)'"
+    assert (
+        analyzer.evaluate("Bash", {"command": cmd})["decision"] == "APPROVE"
+    ), "if this now blocks, the Phase B destination redesign landed — update this test"
