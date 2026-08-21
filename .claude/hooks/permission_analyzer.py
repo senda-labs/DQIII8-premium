@@ -668,6 +668,108 @@ def _mask_quotes_for_readonly(cmd: str) -> str:
     return "".join(out)
 
 
+# 2026-08-20 (A6). Ver _python_payload_verdict.
+_PY_CMD_RE = re.compile(r"(?:^|[\s;&|])(?:/[\w./-]*/)?python[\d.]*(?:\s|$)")
+_PY_DASH_C_RE = re.compile(
+    r"(?:^|[\s;&|])(?:/[\w./-]*/)?python[\d.]*\s+(?:-\w+\s+)*-c\s+(['\"])(.*?)\1",
+    re.S,
+)
+# Heredoc con terminador en su propia linea. Sin terminador no hay span, y sin
+# span no se afirma nada: la Fase B cayo por dar por buena una extraccion parcial.
+_PY_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1\r?\n(.*?)\r?\n\2(?:\s|$)", re.S)
+
+
+def _python_payloads(cmd: str) -> list[tuple[int, int]]:
+    """Tramos de CMD que son codigo Python entregado a un interprete."""
+    spans = [m.span(2) for m in _PY_DASH_C_RE.finditer(cmd)]
+    if _PY_CMD_RE.search(cmd):
+        spans.extend(m.span(3) for m in _PY_HEREDOC_RE.finditer(cmd))
+    return spans
+
+
+def _python_payload_verdict(cmd: str, spans: list[tuple[int, int]]) -> str:
+    """'inert' | 'active' | 'unknown' para el codigo de SPANS.
+
+    Allowlist sobre el arbol, no sobre el texto: solo `print` de constantes. Un
+    Call cuyo `func` no sea exactamente `Name('print')` basta para marcarlo
+    activo, asi que `getattr(...)`, `breakpoint()`, `vars()` y `'x'.decode()`
+    caen por construccion, no por estar en una lista.
+    """
+    import ast
+
+    permitidos = (
+        ast.Module,
+        ast.Expr,
+        ast.Constant,
+        ast.JoinedStr,
+        ast.FormattedValue,
+        ast.Call,
+        ast.Name,
+        ast.Load,
+        ast.Pass,
+        ast.BinOp,
+        ast.Add,
+        ast.Tuple,
+        ast.List,
+        ast.keyword,
+    )
+    for start, end in spans:
+        try:
+            arbol = ast.parse(cmd[start:end])
+        except (SyntaxError, ValueError):
+            return "unknown"
+        for nodo in ast.walk(arbol):
+            if not isinstance(nodo, permitidos):
+                return "active"
+            if isinstance(nodo, ast.Call) and not (
+                isinstance(nodo.func, ast.Name) and nodo.func.id == "print"
+            ):
+                return "active"
+    return "inert"
+
+
+def _mask_inert_python(cmd: str) -> str:
+    """CMD con el codigo Python neutralizado si TODO el es demostrablemente inerte."""
+    spans = _python_payloads(cmd)
+    if not spans or _python_payload_verdict(cmd, spans) != "inert":
+        return cmd
+    out = list(cmd)
+    for start, end in spans:
+        for i in range(start, end):
+            out[i] = "x"
+    return "".join(out)
+
+
+_PATH_TOKEN_WORD_RE = re.compile(r"[A-Za-z0-9_]")
+
+
+def _mentions_protected_path(cmd: str) -> bool:
+    """¿Nombra el comando algun blocked/governance path, como PATH y no como fragmento?
+
+    El substring pelado no vale: `.env` vive dentro de `os.environ`, y con el
+    se escalaba toda lectura de entorno. Se exige borde de token por delante
+    siempre, y por detras solo si el token acaba en caracter de palabra —
+    `.claude/hooks/` va seguido del nombre del fichero por construccion.
+
+    Grueso a proposito: solo decide si se pide revision humana, nunca si se
+    deniega, asi que un fallo cuesta friccion o el comportamiento previo a A6,
+    nunca correccion.
+    """
+
+    def _borde(ch: str) -> bool:
+        return not ch or not _PATH_TOKEN_WORD_RE.match(ch)
+
+    for token in (*BLOCKED_PATHS, *GOVERNANCE_PATHS):
+        mira_detras = bool(_PATH_TOKEN_WORD_RE.match(token[-1]))
+        i = cmd.find(token)
+        while i != -1:
+            fin = i + len(token)
+            if _borde(cmd[i - 1] if i else "") and (not mira_detras or _borde(cmd[fin : fin + 1])):
+                return True
+            i = cmd.find(token, i + 1)
+    return False
+
+
 def _collapse_adjacent_quotes(cmd: str) -> str:
     """Collapse Bash's directly-adjacent-quote string concatenation.
 
@@ -2273,7 +2375,9 @@ class PermissionAnalyzer:
         """
         _copy_only_dests = None
         # A4: `WHERE id > 1` dentro del literal SQL no es una redireccion.
-        is_write = _bash_write_sign_hit(_mask_quotes_for_readonly(_mask_sql_literals(cmd)))
+        is_write = _bash_write_sign_hit(
+            _mask_inert_python(_mask_quotes_for_readonly(_mask_sql_literals(cmd)))
+        )
         if not is_write:
             # Detect sqlite3/psql/mysql with DML (writes to DB without shell write operators)
             if re.search(r"\b(?:sqlite3|psql|mysql|mariadb)\b", cmd):
@@ -2769,6 +2873,25 @@ class PermissionAnalyzer:
                         f"bash_web_egress_sink_host:{_risk[1]}",
                         "Use the documented API host instead.",
                     )
+        # A6: el AST dice que el payload es codigo ACTIVO y el comando nombra
+        # un path protegido. Esto se aprobaba: la heuristica de texto no ve
+        # `getattr(__builtins__, 'op' + 'en')`.
+        _py_spans = _python_payloads(cmd)
+        if (
+            _py_spans
+            and _python_payload_verdict(cmd, _py_spans) == "active"
+            and _mentions_protected_path(cmd)
+        ):
+            return self._escalate(
+                tool,
+                cmd[:80],
+                "Python handed to an interpreter is not statically inert and "
+                "the command names a protected path — its runtime effect "
+                "cannot be checked, human review required.",
+                "bash_interpreter_code_touches_protected_path",
+                "Run the write as an explicit shell command, or confirm the "
+                "code with the user before approving.",
+            )
         return None
 
     def _read_touches_credential(self, tool: str, path: str) -> dict | None:
