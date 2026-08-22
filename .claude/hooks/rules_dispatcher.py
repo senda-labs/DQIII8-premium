@@ -169,19 +169,25 @@ def _read(alias: str) -> str:
 _STATE_DIR = Path(__file__).resolve().parent.parent.parent / "var" / "rules_injected"
 
 
-def _state_file() -> Path | None:
-    """This session's state file, or None when dedup must not apply."""
+def _state_file(session_id: str = "") -> Path | None:
+    """This session's state file, or None when dedup must not apply.
+
+    session_id should be the real id from the hook's stdin payload (see
+    get_rules()); the CLAUDE_SESSION_ID env var is never populated by Claude
+    Code itself (see precompact.py/postcompact.py) and is kept only as a
+    fallback for direct/test invocation of this module.
+    """
     if os.environ.get("DQIII8_RULES_DEDUP", "") == "0":
         return None  # explicit opt-out (tests): measure true per-call cost
-    sid = os.environ.get("CLAUDE_SESSION_ID", "").strip()
+    sid = (session_id or os.environ.get("CLAUDE_SESSION_ID", "")).strip()
     if not sid:
         return None  # no session identity to key state on
     return _STATE_DIR / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', sid)}.txt"
 
 
-def _injected_this_session() -> set[str]:
+def _injected_this_session(session_id: str = "") -> set[str]:
     """Aliases already injected. Fails open to empty (= inject everything)."""
-    f = _state_file()
+    f = _state_file(session_id)
     if f is None:
         return set()
     try:
@@ -190,9 +196,9 @@ def _injected_this_session() -> set[str]:
         return set()
 
 
-def _record_injected(aliases: Sequence[str]) -> None:
+def _record_injected(aliases: Sequence[str], session_id: str = "") -> None:
     """Append aliases to this session's state. Best-effort by contract."""
-    f = _state_file()
+    f = _state_file(session_id)
     if f is None or not aliases:
         return
     try:
@@ -207,7 +213,7 @@ def _record_injected(aliases: Sequence[str]) -> None:
         )
 
 
-def get_rules(tool: str, tool_input: dict) -> str:
+def get_rules(tool: str, tool_input: dict, session_id: str = "") -> str:
     """Return concatenated relevant rules for this tool call.
 
     Args:
@@ -255,7 +261,7 @@ def get_rules(tool: str, tool_input: dict) -> str:
             seen.add(a)
             unique.append(a)
 
-    already = _injected_this_session()
+    already = _injected_this_session(session_id)
     unique = [a for a in unique if a not in already]
 
     if not unique:
@@ -275,7 +281,7 @@ def get_rules(tool: str, tool_input: dict) -> str:
     if len(parts) == 1:
         return ""
 
-    _record_injected(emitted)
+    _record_injected(emitted, session_id)
     return "\n\n".join(parts)
 
 
