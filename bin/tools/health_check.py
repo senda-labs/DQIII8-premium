@@ -22,6 +22,7 @@ Exit code 0 always (cron-safe); alerting is the signal.
 
 import json
 import shutil
+import socket
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -143,7 +144,20 @@ def main():
     # disagree, and check_health_check_output() derives freshness from the
     # filename (Opus red-team review, 2026-08-13, P3-6).
     now = datetime.now()
-    report = {"date": now.isoformat(), "score": score, "detail": detail}
+    # `database/audit_reports/` is Syncthing-shared with Netcup's own
+    # independent DQIII8 install (`/root/dqiii8` folder sync, .stignore only
+    # excludes *.db/*.log — not these JSON reports), and both hosts run
+    # their own dqiii8-health.timer at the same wall-clock schedule. Without
+    # a host field, one host's report is indistinguishable from the other's
+    # at a glance — confirmed live 2026-08-24: a Netcup report (its own
+    # disk/DB state) was read as Hostinger's, since both landed in this
+    # directory seconds apart with near-identical filenames.
+    report = {
+        "date": now.isoformat(),
+        "host": socket.gethostname(),
+        "score": score,
+        "detail": detail,
+    }
     report_json = json.dumps(report, indent=2)
     # %H%M%S%f (microseconds), not just %H%M%S: two back-to-back manual runs
     # measured live 2026-08-13 landed in the same wall-clock second and the
