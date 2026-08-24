@@ -305,6 +305,13 @@ def _embed_query(text: str) -> list[float] | None:
         pass
 
     # Fallback: sentence-transformers (all-MiniLM-L12-v2, 384-dim — dimension mismatch!)
+    # Guarded by EMBEDDING_DIM, same as the Ollama path above: this fallback's
+    # vectors are never dimension-compatible with what's stored in vec_knowledge,
+    # so returning them would put a mismatched vector into a 1024-dim KNN index.
+    # except Exception (not just ImportError): with the Ollama call now reaching
+    # bge-m3 through an SSH tunnel to Netcup, this fallback is the only remaining
+    # path if the tunnel is down — any failure here (network, model load) must
+    # degrade to None like the Ollama branch, not raise.
     try:
         from sentence_transformers import SentenceTransformer
 
@@ -312,8 +319,10 @@ def _embed_query(text: str) -> list[float] | None:
         if _model_cache is None:
             _embed_query._model = SentenceTransformer("all-MiniLM-L12-v2")
         emb = _embed_query._model.encode(text, normalize_embeddings=True)
+        if len(emb) != EMBEDDING_DIM:
+            return None
         return emb.tolist()
-    except ImportError:
+    except Exception:
         pass
 
     return None

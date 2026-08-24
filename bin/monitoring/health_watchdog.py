@@ -64,7 +64,11 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def check_services() -> None:
     # "autoreporte" removed 2026-08-12: no systemd unit or script by that name
     # exists anywhere in the tree — a phantom entry that always reported "down".
-    for svc in ["dqiii8-bot", "dq-dashboard", "ollama"]:
+    # "ollama" -> "dqiii8-ollama-tunnel" 2026-08-24: bge-m3 moved to Netcup
+    # (memory pressure on this host), reached via a persistent SSH tunnel on
+    # the same 127.0.0.1:11434 — the local ollama.service is intentionally
+    # stopped now, so watching it here would permanently report "inactive".
+    for svc in ["dqiii8-bot", "dq-dashboard", "dqiii8-ollama-tunnel"]:
         result = subprocess.run(
             ["systemctl", "is-active", svc], capture_output=True, text=True, timeout=30
         )
@@ -240,7 +244,7 @@ def check_working_memory() -> None:
 # ── Check 9: Backup freshness ─────────────────────────────────────────────
 
 BACKUP_DIR = DQIII8_ROOT / "database" / "backups"
-BACKUP_DBS = ["dqiii8.db", "dqiii8_knowledge.db", "dqiii8_history.db"]
+BACKUP_DBS = ["dqiii8.db", "dqiii8_knowledge.db"]
 # Live counts 2026-08-12 (4/5/7 per DB) are still refilling at +1/DB/day after
 # the Stage-0.1 rotation fix; a flat >=7 floor would fire on deploy. Ramps to
 # the script's real KEEP=7 target by the date they're expected to reach it.

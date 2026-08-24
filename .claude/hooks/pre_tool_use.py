@@ -283,7 +283,7 @@ _rules_context = ""
 try:
     from rules_dispatcher import get_rules
 
-    _rules_context = get_rules(tool, inp)
+    _rules_context = get_rules(tool, inp, session_id=session)
 except Exception as e:
     log.debug(
         "pre_tool_use: rules RAG injection failed (best-effort): %s", e

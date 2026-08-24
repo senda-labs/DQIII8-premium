@@ -1339,10 +1339,15 @@ def _opaque_blob_hit(url: str) -> str | None:
     return None
 
 
-def _host_egress_risk(host: str) -> tuple[str, str] | None:
+def _host_egress_risk(host: str, port: int | None = None) -> tuple[str, str] | None:
     """Classify a URL host. Returns (severity_kind, token) or None.
 
     severity_kind ∈ {"sink", "metadata", "private"}.
+
+    port=9333 on a loopback/localhost host is PERMIT, not escalate: the
+    user's own CDP tunnel to their local Chrome, opened by their own
+    decision (2026-08-21). Every other private/loopback/metadata
+    classification, and localhost on any other port, is unaffected.
     """
     if not host:
         return ("private", "<empty-host>")
@@ -1371,6 +1376,8 @@ def _host_egress_risk(host: str) -> tuple[str, str] | None:
         if host == "localhost" or host.endswith(
             (".localhost", ".local", ".internal", ".localdomain")
         ):
+            if port == 9333:
+                return None
             return ("private", host)
         return None
     if ip.is_link_local:
@@ -1378,6 +1385,8 @@ def _host_egress_risk(host: str) -> tuple[str, str] | None:
         # legitimate research target, always an SSRF credential grab.
         return ("metadata", host)
     if ip.is_loopback or ip.is_private or ip.is_reserved or ip.is_unspecified:
+        if port == 9333 and ip.is_loopback:
+            return None
         return ("private", host)
     return None
 
@@ -2970,7 +2979,11 @@ class PermissionAnalyzer:
                     _host = urllib.parse.urlparse(_url).hostname or ""
                 except Exception:
                     _host = ""
-                _risk = _host_egress_risk(_host)
+                try:
+                    _port = urllib.parse.urlparse(_url).port
+                except Exception:
+                    _port = None
+                _risk = _host_egress_risk(_host, _port)
                 if _risk:
                     _kind, _token = _risk
                     if _kind in ("sink", "metadata"):
@@ -3181,7 +3194,7 @@ class PermissionAnalyzer:
                 "Never place a key, token or private key in an outbound URL.",
             )
 
-        risk = _host_egress_risk(parsed.hostname or "")
+        risk = _host_egress_risk(parsed.hostname or "", parsed.port)
         if risk:
             kind, token = risk
             if kind == "sink":
